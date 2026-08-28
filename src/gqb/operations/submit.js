@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { EFFECT_STATUS, JOURNAL_PHASE } from "../constants.js";
 import { action } from "../next-safe-action.js";
 import { payloadHash } from "../payload-hash.js";
@@ -12,7 +13,7 @@ import {
 } from "../request-id.js";
 
 export async function queueSubmit(bridge, args = {}) {
-  const traceId = crypto.randomUUID();
+  const traceId = randomUUID();
   let lock = null;
   try {
     bridge.requireJournal();
@@ -35,6 +36,16 @@ export async function queueSubmit(bridge, args = {}) {
     }
 
     const activeStatus = await bridge.readStatus({ include_events: false });
+    if (activeStatus.vocabulary_drift.length > 0) {
+      return envelope({
+        error_code: "ESCALATE_UNKNOWN_STATE",
+        effect_status: EFFECT_STATUS.NOT_APPLIED,
+        fingerprint: activeStatus.fingerprint,
+        next_safe_action: action("ESCALATE_UNKNOWN_STATE", "unknown_upstream_vocabulary"),
+        trace_id: traceId,
+        data: { vocabulary_drift: activeStatus.vocabulary_drift }
+      });
+    }
     if (["running", "awaiting_owner", "blocked"].includes(activeStatus.goal?.state)) {
       return envelope({
         error_code: "ACTIVE_GOAL_EXISTS",
@@ -61,6 +72,21 @@ export async function queueSubmit(bridge, args = {}) {
 
     const upstreamResult = await bridge.callMutator("submit_goal", upstreamArgs, goalKey, upstreamRequestId, lock);
     const postStatus = await bridge.tryPostRead(upstreamResult.goal_id);
+    if (upstreamResult.created === false && postStatus.failed) {
+      bridge.journal.writeOutcome(goalKey, upstreamRequestId, {
+        goal_id: upstreamResult.goal_id,
+        upstream_result: upstreamResult,
+        effect_status: EFFECT_STATUS.INDETERMINATE
+      }, lock);
+      return envelope({
+        error_code: "UPSTREAM_INDETERMINATE",
+        effect_status: EFFECT_STATUS.INDETERMINATE,
+        goal_id: upstreamResult.goal_id,
+        next_safe_action: action("RE_READ_STATUS", "created_false_plan_verification_required"),
+        trace_id: traceId,
+        data: { created: false, post_read_failed: true, authorization_status: null, authorization_request_id: null }
+      });
+    }
     if (upstreamResult.created === false && postStatus.status && !samePlan(postStatus.status, args.name, tasks)) {
       bridge.journal.writeOutcome(goalKey, upstreamRequestId, {
         goal_id: upstreamResult.goal_id,
@@ -83,7 +109,7 @@ export async function queueSubmit(bridge, args = {}) {
       goal_id: upstreamResult.goal_id,
       upstream_result: upstreamResult,
       post_status_snapshot: postStatus.status,
-      effect_status: EFFECT_STATUS.APPLIED
+      effect_status: upstreamResult.created === false ? EFFECT_STATUS.ALREADY_APPLIED_OR_NOOP : EFFECT_STATUS.APPLIED
     }, lock);
 
     let authorization = null;
@@ -100,7 +126,7 @@ export async function queueSubmit(bridge, args = {}) {
 
     return envelope({
       ok: true,
-      effect_status: EFFECT_STATUS.APPLIED,
+      effect_status: upstreamResult.created === false ? EFFECT_STATUS.ALREADY_APPLIED_OR_NOOP : EFFECT_STATUS.APPLIED,
       goal_id: upstreamResult.goal_id,
       fingerprint: postStatus.status?.fingerprint ?? null,
       next_safe_action: postStatus.status?.next_safe_action ?? action("RE_READ_STATUS", "post_read_status_required"),

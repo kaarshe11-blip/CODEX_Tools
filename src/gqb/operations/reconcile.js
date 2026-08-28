@@ -1,10 +1,11 @@
+import { randomUUID } from "node:crypto";
 import { EFFECT_STATUS, JOURNAL_PHASE } from "../constants.js";
 import { action } from "../next-safe-action.js";
 import { envelope, lockKeyForGoal, presubmitGoalKey, samePlan } from "../response.js";
 import { validateDecisionText, ValidationError } from "../request-id.js";
 
 export async function queueReconcile(bridge, args = {}) {
-  const traceId = crypto.randomUUID();
+  const traceId = randomUUID();
   let lock = null;
   try {
     bridge.requireJournal();
@@ -14,10 +15,12 @@ export async function queueReconcile(bridge, args = {}) {
     if (!goalKey || !args.upstream_request_id) throw new ValidationError("explicit journal address is required");
     const entry = bridge.journal.getEntry(goalKey, args.upstream_request_id);
     if (!entry) throw new ValidationError("journal entry not found");
+    if (entry.phase !== JOURNAL_PHASE.INTENT) return bridge.cachedEnvelope(entry, traceId);
     lock = await bridge.journal.acquireLock(entry.tool === "submit_goal" ? "active-goal-slot" : lockKeyForGoal(entry.goal_id ?? args.goal_id));
 
     if (mode === "OBSERVE") return observeIntent(bridge, entry, traceId, lock);
     if (mode === "ADOPT_SUBMIT") return adoptSubmit(bridge, entry, args, traceId, lock);
+    if (entry.tool === "submit_goal") return replaySubmit(bridge, entry, traceId, lock);
 
     const result = await bridge.callMutator(entry.tool, entry.upstream_arguments, entry.goal_key, entry.upstream_request_id, lock);
     bridge.journal.writeOutcome(entry.goal_key, entry.upstream_request_id, {
@@ -82,7 +85,67 @@ async function observeIntent(bridge, entry, traceId, lock) {
   });
 }
 
+async function replaySubmit(bridge, entry, traceId, lock) {
+  const activeStatus = await bridge.readStatus({ include_events: true, event_limit: 500 });
+  const activeGoal = activeStatus.goal;
+  const activeIsNonTerminal = activeGoal && !["completed", "cancelled"].includes(activeGoal.state);
+  const identityLinked = activeGoal?.goal_id === entry.goal_id || (activeStatus.events ?? []).some((event) =>
+    event.event_type === "GOAL_SUBMITTED" &&
+    (event.payload?.request_id === entry.upstream_request_id || event.payload?.requestId === entry.upstream_request_id)
+  );
+  if (activeIsNonTerminal && !identityLinked) {
+    return envelope({
+      error_code: "AMBIGUOUS_SUBMIT_OUTCOME",
+      effect_status: EFFECT_STATUS.INDETERMINATE,
+      goal_id: entry.goal_id,
+      fingerprint: activeStatus.fingerprint,
+      next_safe_action: action("OWNER_DECISION_REQUIRED", "ambiguous_submit_outcome"),
+      trace_id: traceId,
+      data: { active_goal: activeGoal }
+    });
+  }
+
+  const result = await bridge.callMutator("submit_goal", entry.upstream_arguments, entry.goal_key, entry.upstream_request_id, lock);
+  const status = await bridge.readStatus({ goal_id: result.goal_id, include_events: true, event_limit: 500 });
+  if (result.created === false && !samePlan(status, entry.upstream_arguments.name, entry.upstream_arguments.tasks)) {
+    bridge.journal.writeOutcome(entry.goal_key, entry.upstream_request_id, {
+      phase: JOURNAL_PHASE.RECONCILED,
+      goal_id: result.goal_id,
+      upstream_result: result,
+      post_status_snapshot: status,
+      effect_status: EFFECT_STATUS.NOT_APPLIED
+    }, lock);
+    return envelope({
+      error_code: "IDEMPOTENCY_KEY_REUSE",
+      effect_status: EFFECT_STATUS.NOT_APPLIED,
+      goal_id: result.goal_id,
+      fingerprint: status.fingerprint,
+      next_safe_action: status.next_safe_action,
+      trace_id: traceId,
+      data: { mode: "REPLAY", conflict: true }
+    });
+  }
+  const effect = result.created === false ? EFFECT_STATUS.ALREADY_APPLIED_OR_NOOP : EFFECT_STATUS.APPLIED;
+  bridge.journal.writeOutcome(entry.goal_key, entry.upstream_request_id, {
+    phase: JOURNAL_PHASE.RECONCILED,
+    goal_id: result.goal_id,
+    upstream_result: result,
+    post_status_snapshot: status,
+    effect_status: effect
+  }, lock);
+  return envelope({
+    ok: true,
+    effect_status: effect,
+    goal_id: result.goal_id,
+    fingerprint: status.fingerprint,
+    next_safe_action: status.next_safe_action,
+    trace_id: traceId,
+    data: { mode: "REPLAY", upstream_result: result }
+  });
+}
+
 async function adoptSubmit(bridge, entry, args, traceId, lock) {
+  if (entry.tool !== "submit_goal") throw new ValidationError("ADOPT_SUBMIT only applies to submit_goal entries");
   validateDecisionText(args.owner_confirmation_text, { min: 20, field: "owner_confirmation_text" });
   const status = await bridge.readStatus({ goal_id: args.adopt_goal_id, include_events: false });
   if (!samePlan(status, entry.upstream_arguments.name, entry.upstream_arguments.tasks)) {

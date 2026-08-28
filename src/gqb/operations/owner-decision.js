@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { CONTROL_KINDS, EFFECT_STATUS, JOURNAL_PHASE } from "../constants.js";
 import { currentTask } from "../fingerprint.js";
 import { JournalError } from "../journal.js";
@@ -15,7 +16,7 @@ export async function queueControl(bridge, args = {}) {
 }
 
 export async function ownerDecisionMutation(bridge, args, { allowedKinds, isResume }) {
-  const traceId = crypto.randomUUID();
+  const traceId = randomUUID();
   let lock = null;
   try {
     bridge.requireJournal();
@@ -48,6 +49,17 @@ export async function ownerDecisionMutation(bridge, args, { allowedKinds, isResu
     }
 
     const preStatus = await bridge.readStatus({ goal_id: goalId, include_events: true, event_limit: 500 });
+    if (preStatus.vocabulary_drift.length > 0) {
+      return envelope({
+        error_code: "ESCALATE_UNKNOWN_STATE",
+        effect_status: EFFECT_STATUS.NOT_APPLIED,
+        goal_id: goalId,
+        fingerprint: preStatus.fingerprint,
+        next_safe_action: action("ESCALATE_UNKNOWN_STATE", "unknown_upstream_vocabulary"),
+        trace_id: traceId,
+        data: { vocabulary_drift: preStatus.vocabulary_drift }
+      });
+    }
     if (args.expected_fingerprint && args.expected_fingerprint !== preStatus.fingerprint.value) {
       return envelope({
         error_code: "STALE_FINGERPRINT",
@@ -133,13 +145,16 @@ export function resumeGateVerdict(status, kind, taskId = null) {
     ? (status?.tasks ?? []).find((task) => task.task_id === taskId && task.state !== "completed")
     : currentTask(status?.tasks ?? []);
   const gates = [];
+  if (taskId && !target) {
+    return { ok: false, error_code: "INVALID_ARGUMENT", next_safe_action: action("RE_READ_STATUS", "target_task_not_found"), gates };
+  }
   if (!goal || !target) {
     return { ok: false, error_code: "KIND_STATE_MISMATCH", next_safe_action: action("ESCALATE_UNRECOGNIZED", "missing_goal_or_target_task"), gates };
   }
   const live = status?.current_dispatch && ["PENDING", "FIRED", "CLAIMED"].includes(status.current_dispatch.state) ? status.current_dispatch : null;
   if (live && goal.state === "running" && target.state === "active") {
     gates.push({ code: "NOOP_ALREADY_IN_FLIGHT", passed: false });
-    return { ok: false, error_code: "KIND_STATE_MISMATCH", next_safe_action: action("WAIT_FOR_WORKER", "already_in_flight"), gates };
+    return { ok: false, error_code: "NOOP_ALREADY_IN_FLIGHT", next_safe_action: action("WAIT_FOR_WORKER", "already_in_flight"), gates };
   }
   const answerAllowed = Boolean(goal.pending_question) || goal.state === "awaiting_owner" || goal.state === "blocked" || target.state === "blocked";
   if (kind === "ANSWER" && !answerAllowed) {

@@ -41,18 +41,19 @@ export class GigTrackQueueBridge {
   }
 
   async readStatus({ goal_id = null, include_events = false, event_limit = 100 } = {}) {
+    const requestedEventLimit = Math.min(Math.max(Number(event_limit || 100), 1), 500);
     const args = {
-      includeEvents: Boolean(include_events),
-      eventLimit: Math.min(Math.max(Number(event_limit || 100), 1), 500)
+      includeEvents: true,
+      eventLimit: 500
     };
     if (goal_id) args.goalId = goal_id;
     const upstream = await this.controller.callTool("get_goal_status", args, { timeoutMs: 10000 });
-    const eventLimit = args.eventLimit;
+    const eventLimit = 500;
     const events = upstream.events ?? [];
     const normalized = {
       ...upstream,
-      events: include_events ? events : [],
-      events_complete: include_events ? eventsComplete(events, eventLimit) : null,
+      events: include_events ? events.slice(0, requestedEventLimit) : [],
+      events_complete: eventsComplete(events, eventLimit),
       vocabulary_drift: findVocabularyDrift(upstream)
     };
     normalized.fingerprint = statusFingerprint(upstream);
@@ -218,7 +219,7 @@ export class GigTrackQueueBridge {
 
   cachedEnvelope(entry, traceId) {
     return envelope({
-      ok: entry.effect_status === EFFECT_STATUS.APPLIED,
+      ok: [EFFECT_STATUS.APPLIED, EFFECT_STATUS.ALREADY_APPLIED_OR_NOOP].includes(entry.effect_status),
       effect_status: entry.effect_status,
       goal_id: entry.goal_id,
       fingerprint: entry.post_status_snapshot?.fingerprint ?? null,
@@ -241,6 +242,15 @@ export class GigTrackQueueBridge {
   }
 
   errorEnvelope(error, traceId) {
+    if (error instanceof JournalError && error.code === "LOCK_LEASE_LOST") {
+      return envelope({
+        error_code: "LOCK_LEASE_LOST",
+        effect_status: EFFECT_STATUS.INDETERMINATE,
+        next_safe_action: action("RECONCILE_BRIDGE_UNCERTAINTY", "lock_lease_lost"),
+        trace_id: traceId,
+        data: { message: error.message }
+      });
+    }
     if (error instanceof ValidationError || error instanceof JournalError) {
       return envelope({
         error_code: error.code ?? "INVALID_ARGUMENT",

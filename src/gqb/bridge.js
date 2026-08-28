@@ -1,0 +1,270 @@
+import { randomUUID } from "node:crypto";
+import { CHANNEL, EFFECT_STATUS } from "./constants.js";
+import { ControllerClient, UpstreamError } from "./controller-client.js";
+import { statusFingerprint } from "./fingerprint.js";
+import { JournalError, SqliteJournal } from "./journal.js";
+import { queueControl, queueResume, resumeGateVerdict } from "./operations/owner-decision.js";
+import { queueReconcile } from "./operations/reconcile.js";
+import { queueSubmit } from "./operations/submit.js";
+import { action, deriveNextSafeAction, eventsComplete } from "./next-safe-action.js";
+import { envelope } from "./response.js";
+import { ValidationError } from "./request-id.js";
+import { findVocabularyDrift } from "./vocabulary.js";
+
+export class GigTrackQueueBridge {
+  constructor({
+    controller = new ControllerClient(),
+    journal,
+    channel = CHANNEL.LOCAL_SOCKET,
+    handoffCapability = false,
+    ownershipChannelAvailable = true
+  } = {}) {
+    this.controller = controller;
+    this.journal = journal;
+    this.channel = channel;
+    this.handoffCapability = handoffCapability;
+    this.ownershipChannelAvailable = ownershipChannelAvailable;
+  }
+
+  static fromEnv(env = process.env) {
+    const journal = env.GQB_JOURNAL_PATH ? new SqliteJournal({ path: env.GQB_JOURNAL_PATH }) : null;
+    return new GigTrackQueueBridge({
+      controller: new ControllerClient({ socketPath: env.GQB_CONTROLLER_SOCKET || "/home/runner/workspace/.mcp-local/controller.sock" }),
+      journal,
+      handoffCapability: env.GQB_HANDOFF_EXPECTED_DISPATCH_CAPABILITY === "true"
+    });
+  }
+
+  requireJournal() {
+    if (!this.journal) throw new JournalError("journal is required for mutating tools", "JOURNAL_UNAVAILABLE");
+    this.journal.ensureOpen();
+  }
+
+  async readStatus({ goal_id = null, include_events = false, event_limit = 100 } = {}) {
+    const args = {
+      includeEvents: Boolean(include_events),
+      eventLimit: Math.min(Math.max(Number(event_limit || 100), 1), 500)
+    };
+    if (goal_id) args.goalId = goal_id;
+    const upstream = await this.controller.callTool("get_goal_status", args, { timeoutMs: 10000 });
+    const eventLimit = args.eventLimit;
+    const events = upstream.events ?? [];
+    const normalized = {
+      ...upstream,
+      events: include_events ? events : [],
+      events_complete: include_events ? eventsComplete(events, eventLimit) : null,
+      vocabulary_drift: findVocabularyDrift(upstream)
+    };
+    normalized.fingerprint = statusFingerprint(upstream);
+    const goalKey = normalized.goal?.goal_id ?? null;
+    const openIntent = goalKey && this.journal ? this.journal.listOpenIntents(goalKey).length > 0 : false;
+    normalized.next_safe_action = deriveNextSafeAction(upstream, {
+      ownershipChannelAvailable: this.ownershipChannelAvailable,
+      openIntent,
+      eventLimit,
+      handoffCapability: this.handoffCapability
+    });
+    return normalized;
+  }
+
+  async queue_status(args = {}) {
+    const traceId = randomUUID();
+    try {
+      const status = await this.readStatus(args);
+      return envelope({
+        ok: true,
+        goal_id: status.goal?.goal_id ?? null,
+        fingerprint: status.fingerprint,
+        next_safe_action: status.next_safe_action,
+        trace_id: traceId,
+        data: {
+          status,
+          channel: this.channel,
+          bridge_uncertainty: status.next_safe_action.code === "RECONCILE_BRIDGE_UNCERTAINTY"
+        }
+      });
+    } catch (error) {
+      return this.errorEnvelope(error, traceId);
+    }
+  }
+
+  async queue_preflight(args = {}) {
+    const traceId = randomUUID();
+    try {
+      const operation = args.operation;
+      const status = operation === "SUBMIT" ? null : await this.readStatus({ goal_id: args.goal_id, include_events: true, event_limit: 500 });
+      if (operation === "HANDOFF" && !this.handoffCapability) {
+        return envelope({
+          error_code: "UPSTREAM_CAPABILITY_REQUIRED",
+          effect_status: EFFECT_STATUS.NOT_APPLIED,
+          goal_id: args.goal_id ?? null,
+          fingerprint: status?.fingerprint ?? null,
+          next_safe_action: status?.next_safe_action ?? action("WAIT_FOR_WORKER", "recovery_requires_upstream_capability", { notes: "RECOVERY_REQUIRES_UPSTREAM_CAPABILITY" }),
+          trace_id: traceId,
+          data: { would_admit: false, gates: [{ code: "UPSTREAM_CAPABILITY_REQUIRED", passed: false }] }
+        });
+      }
+      if (operation === "RESUME" || operation === "ANSWER") {
+        const verdict = resumeGateVerdict(status, operation, args.args?.task_id);
+        return envelope({
+          ok: verdict.ok,
+          error_code: verdict.error_code,
+          effect_status: verdict.ok ? null : EFFECT_STATUS.NOT_APPLIED,
+          goal_id: status.goal?.goal_id ?? null,
+          fingerprint: status.fingerprint,
+          next_safe_action: verdict.next_safe_action ?? status.next_safe_action,
+          trace_id: traceId,
+          data: { would_admit: verdict.ok, gates: verdict.gates, projected_effect: verdict.projected_effect ?? null }
+        });
+      }
+      return envelope({
+        ok: true,
+        goal_id: status?.goal?.goal_id ?? null,
+        fingerprint: status?.fingerprint ?? null,
+        next_safe_action: status?.next_safe_action ?? null,
+        trace_id: traceId,
+        data: { would_admit: true, gates: [], projected_effect: operation }
+      });
+    } catch (error) {
+      return this.errorEnvelope(error, traceId);
+    }
+  }
+
+  async queue_submit(args = {}) {
+    return queueSubmit(this, args);
+  }
+
+  async queue_resume(args = {}) {
+    return queueResume(this, args);
+  }
+
+  async queue_control(args = {}) {
+    return queueControl(this, args);
+  }
+
+  async queue_handoff(args = {}) {
+    const traceId = randomUUID();
+    return envelope({
+      error_code: "UPSTREAM_CAPABILITY_REQUIRED",
+      effect_status: EFFECT_STATUS.NOT_APPLIED,
+      goal_id: args.goal_id ?? null,
+      next_safe_action: action("WAIT_FOR_WORKER", "recovery_requires_upstream_capability", { notes: "RECOVERY_REQUIRES_UPSTREAM_CAPABILITY" }),
+      trace_id: traceId,
+      data: {
+        mutation_enabled: false,
+        expected_dispatch_cas_or_event_correlation: this.handoffCapability
+      }
+    });
+  }
+
+  async queue_reconcile(args = {}) {
+    return queueReconcile(this, args);
+  }
+
+  async queue_channel_health() {
+    const traceId = randomUUID();
+    let journal = { available: false, open_intents: null, error: null };
+    try {
+      if (this.journal) {
+        this.journal.ensureOpen();
+        const openIntents = this.journal.listOpenIntents();
+        journal = {
+          available: true,
+          open_intents: openIntents.length,
+          oldest_open_intent_age_ms: openIntents.length ? Date.now() - Date.parse(openIntents[0].created_at) : null
+        };
+      }
+    } catch (error) {
+      journal = { available: false, open_intents: null, error: error.code ?? error.message };
+    }
+    return envelope({
+      ok: journal.available && this.ownershipChannelAvailable,
+      error_code: journal.available ? null : "JOURNAL_UNAVAILABLE",
+      trace_id: traceId,
+      data: {
+        channel: this.channel,
+        ownership_channel_available: this.ownershipChannelAvailable,
+        controller_socket: this.controller.socketPath ?? null,
+        journal,
+        handoff_capabilities: {
+          expected_dispatch_cas_or_event_correlation: this.handoffCapability,
+          mutating_handoff_enabled: false
+        }
+      }
+    });
+  }
+
+  async callMutator(tool, args, goalKey, upstreamRequestId, lock) {
+    try {
+      return await this.controller.callTool(tool, args);
+    } catch (error) {
+      if (error instanceof UpstreamError && error.deterministic) {
+        this.journal.writeOutcome(goalKey, upstreamRequestId, {
+          upstream_result: error.upstreamError,
+          effect_status: EFFECT_STATUS.NOT_APPLIED
+        }, lock);
+      }
+      throw error;
+    }
+  }
+
+  async tryPostRead(goalId) {
+    try {
+      return { failed: false, status: await this.readStatus({ goal_id: goalId, include_events: true, event_limit: 500 }) };
+    } catch {
+      return { failed: true, status: null };
+    }
+  }
+
+  cachedEnvelope(entry, traceId) {
+    return envelope({
+      ok: entry.effect_status === EFFECT_STATUS.APPLIED,
+      effect_status: entry.effect_status,
+      goal_id: entry.goal_id,
+      fingerprint: entry.post_status_snapshot?.fingerprint ?? null,
+      next_safe_action: entry.post_status_snapshot?.next_safe_action ?? null,
+      replayed: true,
+      trace_id: traceId,
+      data: { upstream_result: entry.upstream_result, journal_entry: entry }
+    });
+  }
+
+  reconcileEnvelope(entry, traceId) {
+    return envelope({
+      error_code: "RECONCILE_BRIDGE_UNCERTAINTY",
+      effect_status: EFFECT_STATUS.INDETERMINATE,
+      goal_id: entry.goal_id,
+      next_safe_action: action("RECONCILE_BRIDGE_UNCERTAINTY", "open_bridge_intent"),
+      trace_id: traceId,
+      data: { journal_entry: entry }
+    });
+  }
+
+  errorEnvelope(error, traceId) {
+    if (error instanceof ValidationError || error instanceof JournalError) {
+      return envelope({
+        error_code: error.code ?? "INVALID_ARGUMENT",
+        effect_status: EFFECT_STATUS.NOT_APPLIED,
+        trace_id: traceId,
+        data: { message: error.message }
+      });
+    }
+    if (error instanceof UpstreamError) {
+      const errorCode = error.timeout ? "UPSTREAM_TIMEOUT_INDETERMINATE" : error.mappedCode ?? "UPSTREAM_INDETERMINATE";
+      return envelope({
+        error_code: errorCode,
+        effect_status: error.deterministic ? EFFECT_STATUS.NOT_APPLIED : EFFECT_STATUS.INDETERMINATE,
+        next_safe_action: error.deterministic ? null : action("RECONCILE_BRIDGE_UNCERTAINTY", "upstream_indeterminate"),
+        trace_id: traceId,
+        data: { message: error.message, upstream_code: error.upstreamCode ?? null }
+      });
+    }
+    return envelope({
+      error_code: "UPSTREAM_INDETERMINATE",
+      effect_status: EFFECT_STATUS.INDETERMINATE,
+      next_safe_action: action("RECONCILE_BRIDGE_UNCERTAINTY", "unexpected_error"),
+      trace_id: traceId,
+      data: { message: error?.message ?? String(error) }
+    });
+  }
+}

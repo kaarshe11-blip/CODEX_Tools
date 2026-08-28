@@ -1,0 +1,17 @@
+{
+  "name": "codex-tools",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Codex-built tools, including the GigTrack Queue Bridge MCP server.",
+  "bin": {
+    "gigtrack-queue-bridge": "./bin/gqb-mcp.js"
+  },
+  "scripts": {
+    "test": "node --test",
+    "start:gqb": "node ./bin/gqb-mcp.js"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}

@@ -189,6 +189,30 @@ test("controller client has no implicit Replit socket default", async () => {
   );
 });
 
+test("controller client rejects unsupported URL schemes and ambiguous transport config", async () => {
+  const unsupported = new ControllerClient({ url: "ftp://controller.example/mcp" });
+  assert.equal(unsupported.describeTransport().kind, "invalid_url");
+  await assert.rejects(
+    () => unsupported.callTool("get_goal_status", {}),
+    (error) => {
+      assert.equal(error.mappedCode, "CONTROLLER_UNCONFIGURED");
+      return true;
+    }
+  );
+
+  const ambiguous = new ControllerClient({ socketPath: "/tmp/controller.sock", url: "http://controller.example/mcp" });
+  assert.equal(ambiguous.describeTransport().kind, "ambiguous");
+  await assert.rejects(
+    () => ambiguous.callTool("get_goal_status", {}),
+    (error) => {
+      assert.equal(error.mappedCode, "CONTROLLER_CONFIG_AMBIGUOUS");
+      assert.equal(error.name, "UpstreamError");
+      assert.equal(error.message, "controller socket and URL are both configured");
+      return true;
+    }
+  );
+});
+
 test("queue_channel_health cannot report ok without controller transport", async () => {
   const tmp = tempJournal();
   let journal;
@@ -266,6 +290,7 @@ test("doctor RCA assumptions preserve unknown instead of false green booleans", 
   assert.equal(assumptions.config_entry_missing_or_invalid.verdict, "confirmed");
   assert.equal(assumptions.launch_command_unresolved.verdict, "unknown");
   assert.equal(assumptions.controller_transport_unconfigured.verdict, "confirmed");
+  assert.equal(assumptions.controller_config_ambiguous.verdict, "refuted");
   assert.equal(assumptions.controller_unreachable.verdict, "unknown");
   assert.equal(assumptions.health_false_green_detected.verdict, "unknown");
   assert.equal(assumptions.node_unavailable_on_path.verdict, "confirmed");

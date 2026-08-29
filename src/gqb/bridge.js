@@ -37,7 +37,7 @@ export class GigTrackQueueBridge {
     const controller = ControllerClient.fromEnv(env, { logger: diagnostics });
     const transport = controller.describeTransport();
     diagnostics.event("gqb.transport.selected", {
-      diagnosis: transport.kind === "none" || transport.kind === "invalid_url" ? "CONTROLLER_UNCONFIGURED" : null,
+      diagnosis: transportDiagnosis(transport),
       details: {
         transport,
         env_present: {
@@ -192,7 +192,7 @@ export class GigTrackQueueBridge {
     const transport = this.controller.describeTransport();
     this.logger.event("gqb.transport.selected", {
       traceId,
-      diagnosis: transport.kind === "none" || transport.kind === "invalid_url" ? "CONTROLLER_UNCONFIGURED" : null,
+      diagnosis: transportDiagnosis(transport),
       details: { transport, launch_origin: this.launchSource }
     });
     try {
@@ -250,7 +250,7 @@ export class GigTrackQueueBridge {
         controller_socket: this.controller.socketPath ?? null,
         controller_transport: transport,
         controller: {
-          ping_attempted: transport.kind !== "none" && transport.kind !== "invalid_url",
+          ping_attempted: transportCanAttempt(transport),
           reachable: controller.reachable,
           diagnosis: controller.diagnosis,
           message: controller.message ?? null,
@@ -360,4 +360,14 @@ export class GigTrackQueueBridge {
       data: { message: error?.message ?? String(error) }
     });
   }
+}
+
+function transportDiagnosis(transport) {
+  if (transport.kind === "none" || transport.kind === "invalid_url") return "CONTROLLER_UNCONFIGURED";
+  if (transport.kind === "ambiguous") return "CONTROLLER_CONFIG_AMBIGUOUS";
+  return null;
+}
+
+function transportCanAttempt(transport) {
+  return transport.kind === "socket" || transport.kind === "http" || transport.kind === "existing_remote";
 }

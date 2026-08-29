@@ -37,7 +37,7 @@ export class GigTrackQueueBridge {
     const controller = ControllerClient.fromEnv(env, { logger: diagnostics });
     const transport = controller.describeTransport();
     diagnostics.event("gqb.transport.selected", {
-      diagnosis: transport.kind === "none" || transport.kind === "invalid_url" ? "CONTROLLER_UNCONFIGURED" : null,
+      diagnosis: transportDiagnosis(transport),
       details: {
         transport,
         env_present: {
@@ -188,11 +188,11 @@ export class GigTrackQueueBridge {
 
   async queue_channel_health() {
     const traceId = randomUUID();
-    let journal = { available: false, open_intents: null, error: null };
+    let journal = { configured: Boolean(this.journal), available: false, open_intents: null, error: null };
     const transport = this.controller.describeTransport();
     this.logger.event("gqb.transport.selected", {
       traceId,
-      diagnosis: transport.kind === "none" || transport.kind === "invalid_url" ? "CONTROLLER_UNCONFIGURED" : null,
+      diagnosis: transportDiagnosis(transport),
       details: { transport, launch_origin: this.launchSource }
     });
     try {
@@ -200,15 +200,39 @@ export class GigTrackQueueBridge {
         this.journal.ensureOpen();
         const openIntents = this.journal.listOpenIntents();
         journal = {
+          configured: true,
           available: true,
           open_intents: openIntents.length,
           oldest_open_intent_age_ms: openIntents.length ? Date.now() - Date.parse(openIntents[0].created_at) : null
         };
       }
     } catch (error) {
-      journal = { available: false, open_intents: null, error: error.code ?? error.message };
+      this.logger.event("gqb.journal.failed", {
+        traceId,
+        level: "warn",
+        diagnosis: "JOURNAL_UNAVAILABLE",
+        details: { code: error.code ?? null, message: error.message }
+      });
+      journal = { configured: true, available: false, open_intents: null, error: error.code ?? "JOURNAL_ERROR" };
     }
-    const controller = await this.controller.ping({ timeoutMs: 3000, traceId });
+    let controller;
+    try {
+      controller = await this.controller.ping({ timeoutMs: 3000, traceId });
+    } catch (error) {
+      controller = {
+        ping_attempted: false,
+        reachable: false,
+        diagnosis: error.mappedCode ?? "CONTROLLER_UNREACHABLE",
+        message: error.message,
+        upstream_code: error.upstreamCode ?? null
+      };
+      this.logger.event("gqb.controller.ping.failed", {
+        traceId,
+        level: "warn",
+        diagnosis: controller.diagnosis,
+        details: { message: error.message, code: error.code ?? null }
+      });
+    }
     this.logger.event("gqb.controller.ping.completed", {
       traceId,
       level: controller.reachable ? "info" : "warn",
@@ -216,18 +240,20 @@ export class GigTrackQueueBridge {
       details: {
         transport,
         reachable: controller.reachable,
+        ping_attempted: controller.ping_attempted ?? null,
         idle_goal_null_accepted: controller.idle_goal_null_accepted ?? false,
         upstream_shape: controller.upstream_shape ?? null,
         upstream_code: controller.upstream_code ?? null,
         message: controller.message ?? null
       }
     });
-    const ok = journal.available && this.ownershipChannelAvailable && controller.reachable;
-    const errorCode = !journal.available
-      ? "JOURNAL_UNAVAILABLE"
-      : (!this.ownershipChannelAvailable
-          ? "OWNERSHIP_CHANNEL_UNAVAILABLE"
-          : (controller.diagnosis ?? null));
+    const ok = Boolean(journal.available && this.ownershipChannelAvailable && controller.reachable);
+    const errorCode = controller.diagnosis
+      ?? (!journal.configured
+        ? "JOURNAL_UNCONFIGURED"
+        : (!journal.available
+            ? "JOURNAL_UNAVAILABLE"
+            : (!this.ownershipChannelAvailable ? "OWNERSHIP_CHANNEL_UNAVAILABLE" : null)));
     this.logger.event("gqb.health.completed", {
       traceId,
       level: ok ? "info" : "warn",
@@ -250,7 +276,7 @@ export class GigTrackQueueBridge {
         controller_socket: this.controller.socketPath ?? null,
         controller_transport: transport,
         controller: {
-          ping_attempted: transport.kind !== "none" && transport.kind !== "invalid_url",
+          ping_attempted: controller.ping_attempted ?? transportCanAttempt(transport),
           reachable: controller.reachable,
           diagnosis: controller.diagnosis,
           message: controller.message ?? null,
@@ -360,4 +386,14 @@ export class GigTrackQueueBridge {
       data: { message: error?.message ?? String(error) }
     });
   }
+}
+
+function transportDiagnosis(transport) {
+  if (transport.kind === "none" || transport.kind === "invalid_url") return "CONTROLLER_UNCONFIGURED";
+  if (transport.kind === "ambiguous") return "CONTROLLER_CONFIG_AMBIGUOUS";
+  return null;
+}
+
+function transportCanAttempt(transport) {
+  return transport.kind === "socket" || transport.kind === "http" || transport.kind === "existing_remote";
 }

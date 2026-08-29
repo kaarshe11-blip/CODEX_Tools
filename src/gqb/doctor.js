@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { DiagnosticsLogger, nullLogger } from "./diagnostics.js";
 import { GigTrackQueueBridge } from "./bridge.js";
@@ -25,10 +26,25 @@ export async function runDoctor({ env = process.env, argv = process.argv.slice(2
   });
 
   const nodePath = probeNodeOnPath();
-  const bridge = GigTrackQueueBridge.fromEnv(env, { logger });
-  const health = await bridge.queue_channel_health();
+  let health;
+  try {
+    const bridge = GigTrackQueueBridge.fromEnv(env, { logger });
+    health = await bridge.queue_channel_health();
+  } catch (error) {
+    logger.event("gqb.doctor.health.failed", {
+      level: "warn",
+      diagnosis: "DOCTOR_HEALTH_PROBE_FAILED",
+      details: { message: error.message, code: error.code ?? null }
+    });
+    health = {
+      ok: false,
+      error_code: "DOCTOR_HEALTH_PROBE_FAILED",
+      trace_id: null,
+      data: { controller: { ping_attempted: false, reachable: false, diagnosis: "DOCTOR_HEALTH_PROBE_FAILED" } }
+    };
+  }
   const report = {
-    ok: configScan.valid && launchProbe.ok && health.ok,
+    ok: Boolean(configScan.valid && launchProbe.ok && health.ok),
     generated_at: new Date().toISOString(),
     config_scan: configScan,
     launch_probe: launchProbe,
@@ -53,24 +69,38 @@ export function scanCodexConfig(configPath = configPathFromEnv()) {
   if (!configPath || !existsSync(configPath)) {
     return {
       config_path: configPath,
+      missing: true,
       readable: false,
       matching_servers: [],
       valid: false,
       reason: "config file not found"
     };
   }
-  const text = readFileSync(configPath, "utf8");
-  const sections = [...text.matchAll(/^\s*\[mcp_servers\.([A-Za-z0-9_-]+)\]\s*$/gm)].map((match) => match[1]);
-  const matchingServers = sections.filter((name) => SERVER_NAMES.includes(name));
-  const valid = matchingServers.length > 0;
-  return {
-    config_path: configPath,
-    readable: true,
-    mcp_servers: sections,
-    matching_servers: matchingServers,
-    valid,
-    reason: valid ? null : "no gigtrack_queue_bridge or gqb MCP server entry"
-  };
+  try {
+    const text = readFileSync(configPath, "utf8");
+    const sections = [...text.matchAll(/^\s*\[mcp_servers\.(?:"([^"]+)"|([A-Za-z0-9_-]+))\]\s*(?:#.*)?$/gm)]
+      .map((match) => match[1] ?? match[2]);
+    const matchingServers = sections.filter((name) => SERVER_NAMES.includes(name));
+    const valid = matchingServers.length > 0;
+    return {
+      config_path: configPath,
+      missing: false,
+      readable: true,
+      mcp_servers: sections,
+      matching_servers: matchingServers,
+      valid,
+      reason: valid ? null : "no gigtrack_queue_bridge or gqb MCP server entry"
+    };
+  } catch (error) {
+    return {
+      config_path: configPath,
+      readable: false,
+      matching_servers: [],
+      valid: false,
+      missing: false,
+      reason: `config file unreadable: ${error.code ?? error.message}`
+    };
+  }
 }
 
 export function probeNodeOnPath() {
@@ -102,75 +132,113 @@ export async function probeLaunch(env = process.env) {
   let stderr = "";
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
-  child.stdout.on("data", (chunk) => { stdout += chunk; });
   child.stderr.on("data", (chunk) => { stderr += chunk; });
-
-  const initialize = {
-    jsonrpc: "2.0",
-    id: 1,
-    method: "initialize",
-    params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "gqb-doctor", version: "0.1.0" } }
-  };
-  const list = { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} };
-
-  try {
-    child.stdin.write(`${JSON.stringify(initialize)}\n`);
-    child.stdin.write(`${JSON.stringify(list)}\n`);
-  } catch (error) {
-    child.kill();
-    return { ok: false, diagnosis: "MCP_LAUNCH_FAILED", command: process.execPath, server_path: serverPath, message: error.message };
-  }
 
   const timeoutMs = 5000;
   const result = await new Promise((resolveResult) => {
-    const timer = setTimeout(() => {
+    const responses = [];
+    let buffer = "";
+    let listSent = false;
+    let finished = false;
+    const timer = setTimeout(() => finish({ timed_out: true, responses }), timeoutMs);
+    const finish = (value) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
       child.kill();
-      resolveResult({ timed_out: true });
-    }, timeoutMs);
-    child.stdout.on("data", () => {
-      const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
-      if (lines.length >= 2) {
-        clearTimeout(timer);
-        child.kill();
-        resolveResult({ timed_out: false, lines });
+      resolveResult(value);
+    };
+
+    child.on("error", (error) => finish({ error: error.message, code: error.code ?? null, responses }));
+    child.stdin.on("error", (error) => finish({ error: error.message, code: error.code ?? null, responses }));
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+      buffer += chunk;
+      let newlineIndex;
+      while ((newlineIndex = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, newlineIndex).trim();
+        buffer = buffer.slice(newlineIndex + 1);
+        if (!line) continue;
+        let response;
+        try {
+          response = JSON.parse(line);
+        } catch (error) {
+          finish({ parse_error: error.message, responses });
+          return;
+        }
+        responses.push(response);
+        if (response.id === 1 && !listSent) {
+          listSent = true;
+          try {
+            child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} })}\n`);
+            child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} })}\n`);
+          } catch (error) {
+            finish({ error: error.message, code: error.code ?? null, responses });
+            return;
+          }
+        }
+        if (response.id === 2) {
+          finish({ timed_out: false, responses });
+          return;
+        }
       }
     });
-    child.on("exit", (code) => {
-      clearTimeout(timer);
-      resolveResult({ exited: true, code });
-    });
+    child.on("exit", (code, signal) => finish({ exited: true, code, signal, responses }));
+    const initialize = {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "gqb-doctor", version: "0.1.0" } }
+    };
+    try {
+      child.stdin.write(`${JSON.stringify(initialize)}\n`);
+    } catch (error) {
+      finish({ error: error.message, code: error.code ?? null, responses });
+    }
   });
 
   const durationMs = Date.now() - startedAt;
   if (result.timed_out) {
     return { ok: false, diagnosis: "MCP_LAUNCH_FAILED", command: process.execPath, server_path: serverPath, duration_ms: durationMs, timeout_ms: timeoutMs, stderr: stderr.slice(0, 2000) };
   }
-  try {
-    const responses = result.lines.map((line) => JSON.parse(line));
-    const tools = responses.find((response) => response.id === 2)?.result?.tools ?? [];
+  if (result.error || result.parse_error || result.exited) {
     return {
-      ok: tools.length > 0,
-      diagnosis: tools.length > 0 ? null : "MCP_LAUNCH_FAILED",
+      ok: false,
+      diagnosis: "MCP_LAUNCH_FAILED",
       command: process.execPath,
       server_path: serverPath,
       duration_ms: durationMs,
-      node_version: process.version,
-      tool_count: tools.length,
-      tools: tools.map((tool) => tool.name),
+      message: result.error ?? result.parse_error ?? "MCP process exited before tools/list response",
+      exit_code: result.code ?? null,
+      signal: result.signal ?? null,
+      stdout: stdout.slice(0, 2000),
       stderr: stderr.slice(0, 2000)
     };
-  } catch (error) {
-    return { ok: false, diagnosis: "MCP_LAUNCH_FAILED", command: process.execPath, server_path: serverPath, duration_ms: durationMs, message: error.message, stdout: stdout.slice(0, 2000), stderr: stderr.slice(0, 2000) };
   }
+  const tools = result.responses.find((response) => response.id === 2)?.result?.tools ?? [];
+  return {
+    ok: tools.length > 0,
+    diagnosis: tools.length > 0 ? null : "MCP_LAUNCH_FAILED",
+    command: process.execPath,
+    server_path: serverPath,
+    duration_ms: durationMs,
+    node_version: process.version,
+    tool_count: tools.length,
+    tools: tools.map((tool) => tool.name),
+    stderr: stderr.slice(0, 2000)
+  };
 }
 
 export function rcaAssumptions({ configScan, launchProbe, nodePath, health }) {
   const controllerDiagnosis = health?.data?.controller?.diagnosis ?? health?.error_code ?? null;
   return {
-    config_entry_missing_or_invalid: verdict(configScan.readable, !configScan.valid, "gqb.config.scan.completed", configScan.reason),
+    config_entry_missing_or_invalid: configScan.missing
+      ? verdict(true, true, "gqb.config.scan.completed", configScan.reason)
+      : verdict(configScan.readable, !configScan.valid, "gqb.config.scan.completed", configScan.reason),
     launch_command_unresolved: verdict(configScan.valid, launchProbe.diagnosis === "MCP_LAUNCH_FAILED", "gqb.launch.probe.completed", configScan.valid ? null : "MCP config was not valid, so configured command could not be assessed"),
     stdio_mcp_ready: verdict(true, launchProbe.ok, "gqb.launch.probe.completed"),
     controller_transport_unconfigured: verdict(true, controllerDiagnosis === "CONTROLLER_UNCONFIGURED", "gqb.transport.selected"),
+    controller_config_ambiguous: verdict(true, controllerDiagnosis === "CONTROLLER_CONFIG_AMBIGUOUS", "gqb.transport.selected"),
     controller_unreachable: controllerDiagnosis === "CONTROLLER_UNCONFIGURED"
       ? unknown("transport was not configured, so reachability was not tested")
       : verdict(Boolean(health?.data?.controller?.ping_attempted), controllerDiagnosis === "CONTROLLER_UNREACHABLE", "gqb.controller.ping.completed"),
@@ -194,8 +262,8 @@ function unknown(reason) {
 }
 
 function configPathFromEnv(env = process.env) {
-  const codexHome = env.CODEX_HOME || (env.USERPROFILE ? `${env.USERPROFILE}\\.codex` : null);
-  return codexHome ? `${codexHome}\\config.toml` : null;
+  const codexHome = env.CODEX_HOME || join(env.USERPROFILE || env.HOME || homedir(), ".codex");
+  return join(codexHome, "config.toml");
 }
 
 function redactedEnvironmentSummary(env) {

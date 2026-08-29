@@ -1,18 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   authorizationRequestId,
   canonicalJson,
   ControllerClient,
+  DiagnosticsLogger,
   deriveNextSafeAction,
   GigTrackQueueBridge,
   normalizeRequestId,
   payloadHash,
   JournalError,
   rcaAssumptions,
+  scanCodexConfig,
   SqliteJournal,
   statusFingerprint
 } from "../src/gqb/index.js";
@@ -189,6 +191,72 @@ test("controller client has no implicit Replit socket default", async () => {
   );
 });
 
+test("diagnostics are durable, attributed, redacted, and cycle-safe", () => {
+  const dir = mkdtempSync(join(tmpdir(), "gqb-diag-test-"));
+  try {
+    const stderr = [];
+    const logger = new DiagnosticsLogger({
+      dir,
+      origin: "codex_client",
+      instanceId: "test-instance",
+      pid: 123,
+      stderrWriter: (line) => stderr.push(line)
+    });
+    const details = { token: "secret-value", endpoint: "postgres://user:password@db.example/gqb" };
+    details.self = details;
+    logger.event("gqb.test", { traceId: "trace-1", details });
+    const persisted = JSON.parse(readFileSync(logger.filePath, "utf8").trim());
+    assert.equal(persisted.origin, "codex_client");
+    assert.equal(persisted.trace_id, "trace-1");
+    assert.equal(persisted.details.token, "[REDACTED]");
+    assert.equal(persisted.details.self, "[Circular]");
+    assert.match(persisted.details.endpoint, /\[REDACTED\]/);
+    assert.equal(JSON.parse(stderr[0]).event, "gqb.test");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("doctor config scan handles quoted server names and missing files", () => {
+  const dir = mkdtempSync(join(tmpdir(), "gqb-config-test-"));
+  try {
+    const configPath = join(dir, "config.toml");
+    writeFileSync(configPath, '[mcp_servers."gigtrack_queue_bridge"] # generated\ncommand = "node"\n');
+    const found = scanCodexConfig(configPath);
+    assert.equal(found.valid, true);
+    assert.deepEqual(found.matching_servers, ["gigtrack_queue_bridge"]);
+    const missing = scanCodexConfig(join(dir, "missing.toml"));
+    assert.equal(missing.missing, true);
+    assert.equal(missing.readable, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("controller client rejects unsupported URL schemes and ambiguous transport config", async () => {
+  const unsupported = new ControllerClient({ url: "ftp://controller.example/mcp" });
+  assert.equal(unsupported.describeTransport().kind, "invalid_url");
+  await assert.rejects(
+    () => unsupported.callTool("get_goal_status", {}),
+    (error) => {
+      assert.equal(error.mappedCode, "CONTROLLER_UNCONFIGURED");
+      return true;
+    }
+  );
+
+  const ambiguous = new ControllerClient({ socketPath: "/tmp/controller.sock", url: "http://controller.example/mcp" });
+  assert.equal(ambiguous.describeTransport().kind, "ambiguous");
+  await assert.rejects(
+    () => ambiguous.callTool("get_goal_status", {}),
+    (error) => {
+      assert.equal(error.mappedCode, "CONTROLLER_CONFIG_AMBIGUOUS");
+      assert.equal(error.name, "UpstreamError");
+      assert.equal(error.message, "controller socket and URL are both configured");
+      return true;
+    }
+  );
+});
+
 test("queue_channel_health cannot report ok without controller transport", async () => {
   const tmp = tempJournal();
   let journal;
@@ -266,6 +334,7 @@ test("doctor RCA assumptions preserve unknown instead of false green booleans", 
   assert.equal(assumptions.config_entry_missing_or_invalid.verdict, "confirmed");
   assert.equal(assumptions.launch_command_unresolved.verdict, "unknown");
   assert.equal(assumptions.controller_transport_unconfigured.verdict, "confirmed");
+  assert.equal(assumptions.controller_config_ambiguous.verdict, "refuted");
   assert.equal(assumptions.controller_unreachable.verdict, "unknown");
   assert.equal(assumptions.health_false_green_detected.verdict, "unknown");
   assert.equal(assumptions.node_unavailable_on_path.verdict, "confirmed");

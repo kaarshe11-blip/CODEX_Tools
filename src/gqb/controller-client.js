@@ -7,7 +7,20 @@ export class UpstreamError extends Error {
   constructor(message, details = {}) {
     super(message);
     this.name = "UpstreamError";
-    Object.assign(this, details);
+    for (const key of [
+      "cause",
+      "deterministic",
+      "indeterminate",
+      "mappedCode",
+      "preSend",
+      "statusCode",
+      "timeout",
+      "transport",
+      "upstreamCode",
+      "upstreamError"
+    ]) {
+      if (Object.hasOwn(details, key)) this[key] = details[key];
+    }
   }
 }
 
@@ -30,9 +43,25 @@ export class ControllerClient {
   }
 
   describeTransport() {
+    if (this.url && this.socketPath) {
+      return {
+        kind: "ambiguous",
+        url_configured: true,
+        socket_configured: true
+      };
+    }
     if (this.url) {
       try {
         const parsed = new URL(this.url);
+        if (!["http:", "https:"].includes(parsed.protocol)) {
+          return {
+            kind: "invalid_url",
+            reason: "unsupported_protocol",
+            url_protocol: parsed.protocol,
+            url_host: parsed.host,
+            url_path: parsed.pathname || "/"
+          };
+        }
         return {
           kind: parsed.protocol === "https:" ? "existing_remote" : "http",
           url_protocol: parsed.protocol,
@@ -76,13 +105,17 @@ export class ControllerClient {
         transport
       });
     }
-    if (transport.kind === "invalid_url") {
-      throw new UpstreamError("controller URL is invalid", {
-        deterministic: true,
-        mappedCode: "CONTROLLER_UNCONFIGURED",
-        preSend: true,
-        transport
-      });
+    if (transport.kind === "invalid_url" || transport.kind === "ambiguous") {
+      const mappedCode = transport.kind === "ambiguous" ? "CONTROLLER_CONFIG_AMBIGUOUS" : "CONTROLLER_UNCONFIGURED";
+      throw new UpstreamError(
+        transport.kind === "ambiguous" ? "controller socket and URL are both configured" : "controller URL is invalid",
+        {
+          deterministic: true,
+          mappedCode,
+          preSend: true,
+          transport
+        }
+      );
     }
 
     const body = JSON.stringify({
@@ -106,8 +139,16 @@ export class ControllerClient {
             data += chunk;
           });
           res.on("end", () => {
-            if (res.statusCode >= 400) {
-              const mappedCode = res.statusCode === 401 || res.statusCode === 403 ? "CONTROLLER_AUTH_REJECTED" : "CONTROLLER_UNREACHABLE";
+            if (res.statusCode >= 300) {
+              const mappedCode = res.statusCode === 401 || res.statusCode === 403
+                ? "CONTROLLER_AUTH_REJECTED"
+                : res.statusCode === 404
+                    ? "CONTROLLER_ENDPOINT_NOT_FOUND"
+                    : res.statusCode >= 500
+                        ? "CONTROLLER_UPSTREAM_ERROR"
+                        : res.statusCode >= 400
+                            ? "CONTROLLER_REQUEST_REJECTED"
+                            : "CONTROLLER_REDIRECTED";
               const event = mappedCode === "CONTROLLER_AUTH_REJECTED" ? "gqb.controller.auth.rejected" : "gqb.transport.request.failed";
               this.logger.event(event, {
                 traceId,

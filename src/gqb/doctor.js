@@ -171,6 +171,7 @@ export function rcaAssumptions({ configScan, launchProbe, nodePath, health }) {
     launch_command_unresolved: verdict(configScan.valid, launchProbe.diagnosis === "MCP_LAUNCH_FAILED", "gqb.launch.probe.completed", configScan.valid ? null : "MCP config was not valid, so configured command could not be assessed"),
     stdio_mcp_ready: verdict(true, launchProbe.ok, "gqb.launch.probe.completed"),
     controller_transport_unconfigured: verdict(true, controllerDiagnosis === "CONTROLLER_UNCONFIGURED", "gqb.transport.selected"),
+    controller_config_ambiguous: verdict(true, controllerDiagnosis === "CONTROLLER_CONFIG_AMBIGUOUS", "gqb.transport.selected"),
     controller_unreachable: controllerDiagnosis === "CONTROLLER_UNCONFIGURED"
       ? unknown("transport was not configured, so reachability was not tested")
       : verdict(Boolean(health?.data?.controller?.ping_attempted), controllerDiagnosis === "CONTROLLER_UNREACHABLE", "gqb.controller.ping.completed"),

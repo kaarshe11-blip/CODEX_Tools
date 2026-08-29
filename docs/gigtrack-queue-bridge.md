@@ -6,14 +6,26 @@ The bridge is a queue-management facade over the private GigTrack controller soc
 
 ## Runtime
 
-- `GQB_CONTROLLER_SOCKET`: controller Unix socket path. Defaults to `/home/runner/workspace/.mcp-local/controller.sock`.
+- `GQB_CONTROLLER_SOCKET`: controller Unix socket path. Use only when the bridge process can see that socket.
+- `GQB_CONTROLLER_URL`: HTTP(S) controller MCP endpoint. If neither URL nor socket is explicitly configured, the bridge reports `CONTROLLER_UNCONFIGURED`.
 - `GQB_JOURNAL_PATH`: required for production mutators. Points at the SQLite journal database.
+- `GQB_DIAG_DIR`: optional diagnostics directory for append-only JSONL events.
+- `GQB_LAUNCH_SOURCE`: optional launch origin label, for example `codex_client`.
 
 The stdio entry point is:
 
 ```sh
 node ./bin/gqb-mcp.js
 ```
+
+Diagnostics:
+
+```sh
+node ./bin/gqb-doctor.js --json
+node ./bin/gqb-doctor.js --json --write-report ./gqb-doctor-report.json
+```
+
+The doctor command scans Codex MCP config for `gigtrack_queue_bridge` or `gqb`, probes stdio launch/tool listing, checks whether plain `node` is on `PATH`, runs `queue_channel_health`, and reports tri-state RCA assumptions with `confirmed`, `refuted`, or `unknown`.
 
 The MCP server implements `tools/list` and `tools/call` for:
 

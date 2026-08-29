@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { CHANNEL, EFFECT_STATUS } from "./constants.js";
 import { ControllerClient, UpstreamError } from "./controller-client.js";
+import { DiagnosticsLogger, nullLogger } from "./diagnostics.js";
 import { statusFingerprint } from "./fingerprint.js";
 import { JournalError, SqliteJournal } from "./journal.js";
 import { queueControl, queueResume, resumeGateVerdict } from "./operations/owner-decision.js";
@@ -17,21 +18,44 @@ export class GigTrackQueueBridge {
     journal,
     channel = CHANNEL.LOCAL_SOCKET,
     handoffCapability = false,
-    ownershipChannelAvailable = true
+    ownershipChannelAvailable = true,
+    logger = nullLogger(),
+    launchSource = "unknown"
   } = {}) {
     this.controller = controller;
     this.journal = journal;
     this.channel = channel;
     this.handoffCapability = handoffCapability;
     this.ownershipChannelAvailable = ownershipChannelAvailable;
+    this.logger = logger;
+    this.launchSource = launchSource;
   }
 
-  static fromEnv(env = process.env) {
+  static fromEnv(env = process.env, { logger = null } = {}) {
+    const diagnostics = logger ?? new DiagnosticsLogger({ origin: env.GQB_LAUNCH_SOURCE || "unknown" });
     const journal = env.GQB_JOURNAL_PATH ? new SqliteJournal({ path: env.GQB_JOURNAL_PATH }) : null;
+    const controller = ControllerClient.fromEnv(env, { logger: diagnostics });
+    const transport = controller.describeTransport();
+    diagnostics.event("gqb.transport.selected", {
+      diagnosis: transport.kind === "none" || transport.kind === "invalid_url" ? "CONTROLLER_UNCONFIGURED" : null,
+      details: {
+        transport,
+        env_present: {
+          GQB_CONTROLLER_SOCKET: Boolean(env.GQB_CONTROLLER_SOCKET),
+          GQB_CONTROLLER_URL: Boolean(env.GQB_CONTROLLER_URL),
+          GQB_JOURNAL_PATH: Boolean(env.GQB_JOURNAL_PATH),
+          GQB_DIAG_DIR: Boolean(env.GQB_DIAG_DIR),
+          GQB_LAUNCH_SOURCE: Boolean(env.GQB_LAUNCH_SOURCE)
+        },
+        launch_origin: env.GQB_LAUNCH_SOURCE || "unknown"
+      }
+    });
     return new GigTrackQueueBridge({
-      controller: new ControllerClient({ socketPath: env.GQB_CONTROLLER_SOCKET || "/home/runner/workspace/.mcp-local/controller.sock" }),
+      controller,
       journal,
-      handoffCapability: env.GQB_HANDOFF_EXPECTED_DISPATCH_CAPABILITY === "true"
+      handoffCapability: env.GQB_HANDOFF_EXPECTED_DISPATCH_CAPABILITY === "true",
+      logger: diagnostics,
+      launchSource: env.GQB_LAUNCH_SOURCE || "unknown"
     });
   }
 
@@ -165,6 +189,12 @@ export class GigTrackQueueBridge {
   async queue_channel_health() {
     const traceId = randomUUID();
     let journal = { available: false, open_intents: null, error: null };
+    const transport = this.controller.describeTransport();
+    this.logger.event("gqb.transport.selected", {
+      traceId,
+      diagnosis: transport.kind === "none" || transport.kind === "invalid_url" ? "CONTROLLER_UNCONFIGURED" : null,
+      details: { transport, launch_origin: this.launchSource }
+    });
     try {
       if (this.journal) {
         this.journal.ensureOpen();
@@ -178,14 +208,55 @@ export class GigTrackQueueBridge {
     } catch (error) {
       journal = { available: false, open_intents: null, error: error.code ?? error.message };
     }
+    const controller = await this.controller.ping({ timeoutMs: 3000, traceId });
+    this.logger.event("gqb.controller.ping.completed", {
+      traceId,
+      level: controller.reachable ? "info" : "warn",
+      diagnosis: controller.diagnosis,
+      details: {
+        transport,
+        reachable: controller.reachable,
+        idle_goal_null_accepted: controller.idle_goal_null_accepted ?? false,
+        upstream_shape: controller.upstream_shape ?? null,
+        upstream_code: controller.upstream_code ?? null,
+        message: controller.message ?? null
+      }
+    });
+    const ok = journal.available && this.ownershipChannelAvailable && controller.reachable;
+    const errorCode = !journal.available
+      ? "JOURNAL_UNAVAILABLE"
+      : (!this.ownershipChannelAvailable
+          ? "OWNERSHIP_CHANNEL_UNAVAILABLE"
+          : (controller.diagnosis ?? null));
+    this.logger.event("gqb.health.completed", {
+      traceId,
+      level: ok ? "info" : "warn",
+      diagnosis: ok ? null : errorCode,
+      details: {
+        ok,
+        journal_available: journal.available,
+        ownership_channel_available: this.ownershipChannelAvailable,
+        controller_reachable: controller.reachable,
+        blocking_mutators: !ok
+      }
+    });
     return envelope({
-      ok: journal.available && this.ownershipChannelAvailable,
-      error_code: journal.available ? null : "JOURNAL_UNAVAILABLE",
+      ok,
+      error_code: ok ? null : errorCode,
       trace_id: traceId,
       data: {
         channel: this.channel,
         ownership_channel_available: this.ownershipChannelAvailable,
         controller_socket: this.controller.socketPath ?? null,
+        controller_transport: transport,
+        controller: {
+          ping_attempted: transport.kind !== "none" && transport.kind !== "invalid_url",
+          reachable: controller.reachable,
+          diagnosis: controller.diagnosis,
+          message: controller.message ?? null,
+          idle_goal_null_accepted: controller.idle_goal_null_accepted ?? false,
+          upstream_shape: controller.upstream_shape ?? null
+        },
         journal,
         handoff_capabilities: {
           expected_dispatch_cas_or_event_correlation: this.handoffCapability,
@@ -241,7 +312,19 @@ export class GigTrackQueueBridge {
     });
   }
 
-  errorEnvelope(error, traceId) {
+  errorEnvelope(error, traceId, context = {}) {
+    if (context.tool && (error instanceof JournalError || error instanceof UpstreamError)) {
+      this.logger.event("gqb.mutator.blocked_by_health", {
+        traceId,
+        level: "warn",
+        diagnosis: error.code ?? error.mappedCode ?? "MUTATOR_BLOCKED",
+        details: {
+          tool: context.tool,
+          goal_id_present: Boolean(context.goalId),
+          health_code: error.code ?? error.mappedCode ?? null
+        }
+      });
+    }
     if (error instanceof JournalError && error.code === "LOCK_LEASE_LOST") {
       return envelope({
         error_code: "LOCK_LEASE_LOST",

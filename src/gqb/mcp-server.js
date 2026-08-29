@@ -24,6 +24,14 @@ export class StdioMcpServer {
   constructor({ bridge = GigTrackQueueBridge.fromEnv() } = {}) {
     this.bridge = bridge;
     this.buffer = "";
+    this.bridge.logger.event("gqb.mcp.process.start", {
+      details: {
+        launch_origin: this.bridge.launchSource,
+        pid: process.pid,
+        node_version: process.version,
+        argv: process.argv.slice(0, 2)
+      }
+    });
   }
 
   start() {
@@ -48,6 +56,11 @@ export class StdioMcpServer {
       const result = await this.handleRequest(request);
       this.write({ jsonrpc: "2.0", id: request.id ?? null, result });
     } catch (error) {
+      this.bridge.logger.event("gqb.mcp.lifecycle.failed", {
+        level: "error",
+        diagnosis: "MCP_REQUEST_FAILED",
+        details: { message: error?.message ?? String(error) }
+      });
       this.write({
         jsonrpc: "2.0",
         id: request?.id ?? null,
@@ -58,6 +71,13 @@ export class StdioMcpServer {
 
   async handleRequest(request) {
     if (request.method === "initialize") {
+      this.bridge.logger.event("gqb.mcp.lifecycle.ready", {
+        details: {
+          protocol_version: "2024-11-05",
+          server_version: "0.1.0",
+          tool_count: TOOLS.length
+        }
+      });
       return { protocolVersion: "2024-11-05", serverInfo: { name: "gigtrack-queue-bridge", version: "0.1.0" }, capabilities: { tools: {} } };
     }
     if (request.method === "tools/list") return { tools: listTools() };

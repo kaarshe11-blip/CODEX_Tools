@@ -7,4 +7,5 @@ export { deriveNextSafeAction } from "./next-safe-action.js";
 export { normalizeRequestId, authorizationRequestId } from "./request-id.js";
 export { payloadHash } from "./payload-hash.js";
 export { DiagnosticsLogger, diagnosticsDirFromEnv, redact } from "./diagnostics.js";
-export { runDoctor, scanCodexConfig, rcaAssumptions } from "./doctor.js";
+export { probeNodeOnPath, runDoctor, scanCodexConfig, rcaAssumptions } from "./doctor.js";
+

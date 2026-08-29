@@ -14,6 +14,7 @@ import {
   GigTrackQueueBridge,
   normalizeRequestId,
   payloadHash,
+  probeNodeOnPath,
   JournalError,
   rcaAssumptions,
   scanCodexConfig,
@@ -389,6 +390,13 @@ test("doctor RCA assumptions preserve unknown instead of false green booleans", 
   assert.equal(assumptions.node_unavailable_on_path.verdict, "confirmed");
 });
 
+test("doctor validates the configured absolute Node executable when supplied", () => {
+  const result = probeNodeOnPath({ GQB_NODE_PATH: process.execPath });
+  assert.equal(result.available, true);
+  assert.equal(result.command, process.execPath);
+  assert.equal(result.version, process.version);
+});
+
 test("queue_submit journals presubmit intent and deterministic authorization entry after goal id resolves", async () => {
   const tmp = tempJournal();
   let journal;
@@ -601,3 +609,4 @@ test("resume gate returns closed error codes for in-flight and invalid task targ
     tmp.cleanup();
   }
 });
+

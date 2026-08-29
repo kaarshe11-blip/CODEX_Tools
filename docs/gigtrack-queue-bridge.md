@@ -12,11 +12,27 @@ The bridge is a queue-management facade over the private GigTrack controller soc
 - `GQB_JOURNAL_PATH`: required for production mutators. Points at the SQLite journal database.
 - `GQB_DIAG_DIR`: optional diagnostics directory for append-only JSONL events.
 - `GQB_LAUNCH_SOURCE`: optional launch origin label, for example `codex_client`.
+- `GQB_NODE_PATH`: optional absolute Node executable used by `gqb doctor` and the configured Codex launch entry when `node` is not on `PATH`.
 
 The stdio entry point is:
 
 ```sh
 node ./bin/gqb-mcp.js
+```
+
+On Windows, configure Codex with the absolute Node executable and bridge path rather than relying on `node` being on `PATH`:
+
+```toml
+[mcp_servers.gigtrack_queue_bridge]
+command = 'C:\path\to\node.exe'
+args = ['C:\path\to\CODEX_Tools\bin\gqb-mcp.js']
+startup_timeout_sec = 120
+
+[mcp_servers.gigtrack_queue_bridge.env]
+GQB_NODE_PATH = 'C:\path\to\node.exe'
+GQB_JOURNAL_PATH = 'C:\Users\<user>\AppData\Local\gqb\queue.sqlite'
+GQB_DIAG_DIR = 'C:\Users\<user>\AppData\Local\gqb\diagnostics'
+GQB_LAUNCH_SOURCE = 'codex_client'
 ```
 
 Diagnostics:
@@ -42,3 +58,4 @@ The MCP server implements `tools/list` and `tools/call` for:
 ## Safety Posture
 
 `queue_handoff` is present, but mutating recovery handoff returns `UPSTREAM_CAPABILITY_REQUIRED` until the upstream controller exposes expected-dispatch CAS or event dispatch correlation. This matches the approved v12 design and prevents the bridge from pretending it can safely recover a live worker-owned dispatch.
+

@@ -14,21 +14,23 @@ export async function runDoctor({ env = process.env, argv = process.argv.slice(2
   const writeReportPath = writeReportIndex >= 0 ? argv[writeReportIndex + 1] : null;
   const configPath = configPathFromEnv(env);
   const configScan = scanCodexConfig(configPath);
+  const configuredEnv = loadConfiguredMcpEnv(configPath, configScan.matching_servers[0]);
+  const effectiveEnv = { ...env, ...configuredEnv };
   logger.event("gqb.config.scan.completed", {
     diagnosis: configScan.valid ? null : "MCP_CONFIG_MISSING",
-    details: configScan
+    details: { ...configScan, configured_env_keys: Object.keys(configuredEnv) }
   });
 
-  const launchProbe = await probeLaunch(env);
+  const launchProbe = await probeLaunch(effectiveEnv);
   logger.event("gqb.launch.probe.completed", {
     diagnosis: launchProbe.ok ? null : launchProbe.diagnosis,
     details: launchProbe
   });
 
-  const nodePath = probeNodeOnPath();
+  const nodePath = probeNodeOnPath(effectiveEnv);
   let health;
   try {
-    const bridge = GigTrackQueueBridge.fromEnv(env, { logger });
+    const bridge = GigTrackQueueBridge.fromEnv(effectiveEnv, { logger });
     health = await bridge.queue_channel_health();
   } catch (error) {
     logger.event("gqb.doctor.health.failed", {
@@ -52,7 +54,7 @@ export async function runDoctor({ env = process.env, argv = process.argv.slice(2
     tools: listTools().map((tool) => tool.name),
     diagnostics_file: logger.filePath ?? null,
     health,
-    environment: redactedEnvironmentSummary(env),
+    environment: redactedEnvironmentSummary(effectiveEnv),
     rca_assumptions: rcaAssumptions({ configScan, launchProbe, nodePath, health })
   };
 
@@ -104,18 +106,19 @@ export function scanCodexConfig(configPath = configPathFromEnv()) {
   }
 }
 
-export function probeNodeOnPath() {
-  const result = spawnSync("node", ["--version"], { encoding: "utf8", shell: false });
+export function probeNodeOnPath(env = process.env) {
+  const command = env.GQB_NODE_PATH || "node";
+  const result = spawnSync(command, ["--version"], { encoding: "utf8", shell: false });
   if (result.error?.code === "ENOENT") {
-    return { available: false, diagnosis: "NODE_UNAVAILABLE", command: "node", version: null };
+    return { available: false, diagnosis: "NODE_UNAVAILABLE", command, version: null };
   }
   if (result.status === 0) {
-    return { available: true, diagnosis: null, command: "node", version: result.stdout.trim() };
+    return { available: true, diagnosis: null, command, version: result.stdout.trim() };
   }
   return {
     available: false,
     diagnosis: "NODE_UNAVAILABLE",
-    command: "node",
+    command,
     version: null,
     stderr: result.stderr?.trim() ?? null
   };
@@ -123,8 +126,9 @@ export function probeNodeOnPath() {
 
 export async function probeLaunch(env = process.env) {
   const serverPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../bin/gqb-mcp.js");
+  const command = env.GQB_NODE_PATH || process.execPath;
   const startedAt = Date.now();
-  const child = spawn(process.execPath, [serverPath], {
+  const child = spawn(command, [serverPath], {
     env,
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true
@@ -200,13 +204,13 @@ export async function probeLaunch(env = process.env) {
 
   const durationMs = Date.now() - startedAt;
   if (result.timed_out) {
-    return { ok: false, diagnosis: "MCP_LAUNCH_FAILED", command: process.execPath, server_path: serverPath, duration_ms: durationMs, timeout_ms: timeoutMs, stderr: stderr.slice(0, 2000) };
+    return { ok: false, diagnosis: "MCP_LAUNCH_FAILED", command, server_path: serverPath, duration_ms: durationMs, timeout_ms: timeoutMs, stderr: stderr.slice(0, 2000) };
   }
   if (result.error || result.parse_error || result.exited) {
     return {
       ok: false,
       diagnosis: "MCP_LAUNCH_FAILED",
-      command: process.execPath,
+      command,
       server_path: serverPath,
       duration_ms: durationMs,
       message: result.error ?? result.parse_error ?? "MCP process exited before tools/list response",
@@ -220,7 +224,7 @@ export async function probeLaunch(env = process.env) {
   return {
     ok: tools.length > 0,
     diagnosis: tools.length > 0 ? null : "MCP_LAUNCH_FAILED",
-    command: process.execPath,
+    command,
     server_path: serverPath,
     duration_ms: durationMs,
     node_version: process.version,
@@ -228,6 +232,47 @@ export async function probeLaunch(env = process.env) {
     tools: tools.map((tool) => tool.name),
     stderr: stderr.slice(0, 2000)
   };
+}
+
+function loadConfiguredMcpEnv(configPath, serverName) {
+  if (!configPath || !serverName || !existsSync(configPath)) return {};
+  try {
+    const text = readFileSync(configPath, "utf8");
+    const sectionPattern = /^\s*\[mcp_servers\.(?:"([^"]+)"|([A-Za-z0-9_-]+))\.env\]\s*(?:#.*)?$/gm;
+    const sectionMatch = [...text.matchAll(sectionPattern)].find((match) => (match[1] ?? match[2]) === serverName);
+    if (!sectionMatch) return {};
+    const sectionStart = sectionMatch.index + sectionMatch[0].length;
+    const nextSection = text.slice(sectionStart).search(/^\s*\[/m);
+    const sectionText = text.slice(sectionStart, nextSection < 0 ? undefined : sectionStart + nextSection);
+    const allowed = new Set([
+      "GQB_CONTROLLER_SOCKET",
+      "GQB_CONTROLLER_URL",
+      "GQB_CONTROLLER_BEARER_TOKEN",
+      "GQB_DIAG_DIR",
+      "GQB_JOURNAL_PATH",
+      "GQB_LAUNCH_SOURCE",
+      "GQB_NODE_PATH"
+    ]);
+    const result = {};
+    for (const line of sectionText.split(/\r?\n/)) {
+      const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)(?:\s+#.*)?$/);
+      if (!match || !allowed.has(match[1])) continue;
+      const value = parseTomlString(match[2]);
+      if (value !== null) result[match[1]] = value;
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+function parseTomlString(value) {
+  const trimmed = value.trim();
+  if (trimmed.startsWith("'") && trimmed.endsWith("'")) return trimmed.slice(1, -1);
+  if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    try { return JSON.parse(trimmed); } catch { return null; }
+  }
+  return null;
 }
 
 export function rcaAssumptions({ configScan, launchProbe, nodePath, health }) {
@@ -286,3 +331,4 @@ function redactedUrl(value) {
     return "[invalid-url]";
   }
 }
+

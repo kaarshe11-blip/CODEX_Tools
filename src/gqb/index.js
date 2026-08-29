@@ -1,5 +1,6 @@
 export { GigTrackQueueBridge } from "./bridge.js";
 export { ControllerClient, UpstreamError } from "./controller-client.js";
+export { LocalController, LOCAL_CONTROLLER_MODE } from "./local-controller.js";
 export { SqliteJournal, JournalError } from "./journal.js";
 export { canonicalJson, canonicalize } from "./canonical-json.js";
 export { statusFingerprint, fingerprintProjection, currentTask, liveDispatch } from "./fingerprint.js";

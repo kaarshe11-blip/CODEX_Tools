@@ -41,6 +41,26 @@ test("embedded local controller makes health ready without socket or URL", async
   }
 });
 
+test("embedded local mode refuses a simultaneously configured external controller", async () => {
+  const tmp = tempPaths();
+  let bridge;
+  try {
+    bridge = GigTrackQueueBridge.fromEnv({
+      GQB_CONTROLLER_MODE: "embedded_local",
+      GQB_CONTROLLER_URL: "http://127.0.0.1:12345/mcp",
+      GQB_JOURNAL_PATH: tmp.journalPath
+    });
+    const health = await bridge.queue_channel_health();
+    assert.equal(health.ok, false);
+    assert.equal(health.error_code, "CONTROLLER_CONFIG_AMBIGUOUS");
+    assert.equal(health.data.controller_transport.kind, "ambiguous");
+    assert.equal(health.data.controller_transport.reason, "local_mode_with_external_controller");
+  } finally {
+    bridge?.journal?.close();
+    tmp.cleanup();
+  }
+});
+
 test("embedded local controller can submit and authorize a local queue goal", async () => {
   const tmp = tempPaths();
   let journal;

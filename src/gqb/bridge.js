@@ -56,6 +56,7 @@ export class GigTrackQueueBridge {
     return new GigTrackQueueBridge({
       controller,
       journal,
+      channel: channelForTransport(transport),
       handoffCapability: env.GQB_HANDOFF_EXPECTED_DISPATCH_CAPABILITY === "true",
       logger: diagnostics,
       launchSource: env.GQB_LAUNCH_SOURCE || "unknown"
@@ -402,6 +403,56 @@ function transportCanAttempt(transport) {
 }
 
 function controllerFromEnv(env, { logger }) {
-  if (env.GQB_CONTROLLER_MODE === LOCAL_CONTROLLER_MODE) return LocalController.fromEnv(env, { logger });
+  if (env.GQB_CONTROLLER_MODE === LOCAL_CONTROLLER_MODE) {
+    if (env.GQB_CONTROLLER_SOCKET || env.GQB_CONTROLLER_URL) {
+      return new ConfigConflictController({
+        logger,
+        message: "embedded local controller mode cannot be combined with controller socket or URL",
+        transport: {
+          kind: "ambiguous",
+          mode_configured: LOCAL_CONTROLLER_MODE,
+          socket_configured: Boolean(env.GQB_CONTROLLER_SOCKET),
+          url_configured: Boolean(env.GQB_CONTROLLER_URL),
+          reason: "local_mode_with_external_controller"
+        }
+      });
+    }
+    return LocalController.fromEnv(env, { logger });
+  }
   return ControllerClient.fromEnv(env, { logger });
+}
+
+function channelForTransport(transport) {
+  if (transport.kind === LOCAL_CONTROLLER_MODE) return CHANNEL.EMBEDDED_LOCAL;
+  return CHANNEL.LOCAL_SOCKET;
+}
+
+class ConfigConflictController {
+  constructor({ transport, message, logger = nullLogger() }) {
+    this.transport = transport;
+    this.message = message;
+    this.logger = logger;
+  }
+
+  describeTransport() {
+    return this.transport;
+  }
+
+  async ping() {
+    return {
+      reachable: false,
+      ping_attempted: false,
+      diagnosis: "CONTROLLER_CONFIG_AMBIGUOUS",
+      message: this.message
+    };
+  }
+
+  async callTool() {
+    throw new UpstreamError(this.message, {
+      deterministic: true,
+      mappedCode: "CONTROLLER_CONFIG_AMBIGUOUS",
+      preSend: true,
+      transport: this.transport
+    });
+  }
 }

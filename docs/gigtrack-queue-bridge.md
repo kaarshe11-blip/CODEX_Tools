@@ -10,7 +10,7 @@ The bridge is a queue-management facade over the private GigTrack controller soc
 - `GQB_CONTROLLER_URL`: HTTP(S) controller MCP endpoint. If neither URL nor socket is explicitly configured, the bridge reports `CONTROLLER_UNCONFIGURED`.
 - `GQB_CONTROLLER_MODE=embedded_local`: opt-in local controller for Windows/offline use when no private controller endpoint is reachable. This uses a persisted local state file and does not contact Replit.
 - `GQB_LOCAL_CONTROLLER_STATE_PATH`: optional JSON state file for `embedded_local`; defaults to the local user state directory.
-- Do not set both controller variables. The bridge reports `CONTROLLER_CONFIG_AMBIGUOUS` rather than choosing silently.
+- Do not combine `GQB_CONTROLLER_MODE=embedded_local` with `GQB_CONTROLLER_SOCKET` or `GQB_CONTROLLER_URL`, and do not set both external controller variables. The bridge reports `CONTROLLER_CONFIG_AMBIGUOUS` rather than choosing silently.
 - `GQB_JOURNAL_PATH`: required for production mutators. Points at the SQLite journal database.
 - `GQB_DIAG_DIR`: optional diagnostics directory for append-only JSONL events.
 - `GQB_LAUNCH_SOURCE`: optional launch origin label, for example `codex_client`.

@@ -280,15 +280,19 @@ function parseTomlString(value) {
 
 export function rcaAssumptions({ configScan, launchProbe, nodePath, health }) {
   const controllerDiagnosis = health?.data?.controller?.diagnosis ?? health?.error_code ?? null;
+  const healthProbeFailed = controllerDiagnosis === "DOCTOR_HEALTH_PROBE_FAILED";
+  const transportAssumption = (condition) => healthProbeFailed
+    ? unknown("health probe failed before transport diagnosis was available")
+    : verdict(Boolean(health?.data?.controller), condition, "gqb.transport.selected");
   return {
     config_entry_missing_or_invalid: configScan.missing
       ? verdict(true, true, "gqb.config.scan.completed", configScan.reason)
       : verdict(configScan.readable, !configScan.valid, "gqb.config.scan.completed", configScan.reason),
     launch_command_unresolved: verdict(configScan.valid, launchProbe.diagnosis === "MCP_LAUNCH_FAILED", "gqb.launch.probe.completed", configScan.valid ? null : "MCP config was not valid, so configured command could not be assessed"),
     stdio_mcp_ready: verdict(true, launchProbe.ok, "gqb.launch.probe.completed"),
-    controller_transport_unconfigured: verdict(true, controllerDiagnosis === "CONTROLLER_UNCONFIGURED", "gqb.transport.selected"),
-    controller_config_ambiguous: verdict(true, controllerDiagnosis === "CONTROLLER_CONFIG_AMBIGUOUS", "gqb.transport.selected"),
-    embedded_local_dev_opt_in_missing: verdict(true, controllerDiagnosis === "CONTROLLER_DEV_MODE_REQUIRED", "gqb.transport.selected"),
+    controller_transport_unconfigured: transportAssumption(controllerDiagnosis === "CONTROLLER_UNCONFIGURED"),
+    controller_config_ambiguous: transportAssumption(controllerDiagnosis === "CONTROLLER_CONFIG_AMBIGUOUS"),
+    embedded_local_dev_opt_in_missing: transportAssumption(controllerDiagnosis === "CONTROLLER_DEV_MODE_REQUIRED"),
     controller_unreachable: controllerDiagnosis === "CONTROLLER_UNCONFIGURED"
       ? unknown("transport was not configured, so reachability was not tested")
       : verdict(Boolean(health?.data?.controller?.ping_attempted), controllerDiagnosis === "CONTROLLER_UNREACHABLE", "gqb.controller.ping.completed"),

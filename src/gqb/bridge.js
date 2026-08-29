@@ -123,6 +123,27 @@ export class GigTrackQueueBridge {
     try {
       const operation = args.operation;
       const status = operation === "SUBMIT" ? null : await this.readStatus({ goal_id: args.goal_id, include_events: true, event_limit: 500 });
+      if (operation === "SUBMIT") {
+        const controller = await this.controller.ping({ timeoutMs: 3000, traceId });
+        if (!controller.reachable) {
+          const errorCode = controller.diagnosis ?? transportDiagnosis(this.controller.describeTransport()) ?? "CONTROLLER_UNREACHABLE";
+          this.logger.event("gqb.preflight.blocked", {
+            traceId,
+            level: "warn",
+            diagnosis: errorCode,
+            details: { operation, controller }
+          });
+          return envelope({
+            ok: false,
+            error_code: errorCode,
+            effect_status: EFFECT_STATUS.NOT_APPLIED,
+            goal_id: null,
+            next_safe_action: null,
+            trace_id: traceId,
+            data: { would_admit: false, gates: [{ code: errorCode, passed: false }], controller }
+          });
+        }
+      }
       if (operation === "HANDOFF" && !this.handoffCapability) {
         return envelope({
           error_code: "UPSTREAM_CAPABILITY_REQUIRED",

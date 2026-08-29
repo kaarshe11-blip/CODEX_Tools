@@ -83,6 +83,11 @@ test("embedded local mode fails closed from env unless dev opt-in is explicit", 
     });
     assert.equal(submit.ok, false);
     assert.equal(submit.error_code, "CONTROLLER_DEV_MODE_REQUIRED");
+    assert.equal(submit.effect_status, "NOT_APPLIED");
+    const preflight = await bridge.queue_preflight({ operation: "SUBMIT" });
+    assert.equal(preflight.ok, false);
+    assert.equal(preflight.error_code, "CONTROLLER_DEV_MODE_REQUIRED");
+    assert.equal(preflight.data.would_admit, false);
   } finally {
     bridge?.journal?.close();
     tmp.cleanup();
@@ -157,4 +162,20 @@ test("doctor RCA false-green verdict is cleanly refuted after a successful ping"
   });
   assert.equal(assumptions.health_false_green_detected.verdict, "refuted");
   assert.equal(assumptions.health_false_green_detected.reason, null);
+});
+
+test("doctor RCA transport assumptions remain unknown after a health probe crash", () => {
+  const assumptions = rcaAssumptions({
+    configScan: { missing: false, readable: true, valid: true, reason: null },
+    launchProbe: { ok: true, diagnosis: null },
+    nodePath: { available: true },
+    health: {
+      ok: false,
+      error_code: "DOCTOR_HEALTH_PROBE_FAILED",
+      data: { controller: { ping_attempted: false, reachable: false, diagnosis: "DOCTOR_HEALTH_PROBE_FAILED" } }
+    }
+  });
+  assert.equal(assumptions.controller_transport_unconfigured.verdict, "unknown");
+  assert.equal(assumptions.controller_config_ambiguous.verdict, "unknown");
+  assert.equal(assumptions.embedded_local_dev_opt_in_missing.verdict, "unknown");
 });

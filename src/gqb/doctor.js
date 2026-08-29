@@ -3,7 +3,7 @@ import { dirname, join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { DiagnosticsLogger, nullLogger } from "./diagnostics.js";
+import { DiagnosticsLogger, diagnosticsDirFromEnv, nullLogger } from "./diagnostics.js";
 import { GigTrackQueueBridge } from "./bridge.js";
 import { listTools } from "./mcp-server.js";
 
@@ -50,6 +50,7 @@ export async function runDoctor({ env = process.env, argv = process.argv.slice(2
     launch_probe: launchProbe,
     node_path: nodePath,
     tools: listTools().map((tool) => tool.name),
+    diagnostics_file: logger.filePath ?? null,
     health,
     environment: redactedEnvironmentSummary(env),
     rca_assumptions: rcaAssumptions({ configScan, launchProbe, nodePath, health })
@@ -60,7 +61,7 @@ export async function runDoctor({ env = process.env, argv = process.argv.slice(2
 }
 
 export async function runDoctorCli({ env = process.env, argv = process.argv.slice(2) } = {}) {
-  const logger = new DiagnosticsLogger({ origin: env.GQB_LAUNCH_SOURCE || "doctor" });
+  const logger = new DiagnosticsLogger({ origin: env.GQB_LAUNCH_SOURCE || "doctor", dir: diagnosticsDirFromEnv(env) });
   const report = await runDoctor({ env, argv, logger });
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
 }
@@ -254,7 +255,7 @@ export function rcaAssumptions({ configScan, launchProbe, nodePath, health }) {
 
 function verdict(checked, condition, event, reason = null) {
   if (!checked) return unknown(reason ?? "prerequisite check did not run");
-  return { verdict: condition ? "confirmed" : "refuted", evidence_event: event, reason: null };
+  return { verdict: condition ? "confirmed" : "refuted", evidence_event: event, reason };
 }
 
 function unknown(reason) {
@@ -272,7 +273,8 @@ function redactedEnvironmentSummary(env) {
     GQB_CONTROLLER_URL: env.GQB_CONTROLLER_URL ? redactedUrl(env.GQB_CONTROLLER_URL) : null,
     GQB_JOURNAL_PATH: env.GQB_JOURNAL_PATH ?? null,
     GQB_DIAG_DIR: env.GQB_DIAG_DIR ?? null,
-    GQB_LAUNCH_SOURCE: env.GQB_LAUNCH_SOURCE ?? null
+    GQB_LAUNCH_SOURCE: env.GQB_LAUNCH_SOURCE ?? null,
+    GQB_CONTROLLER_BEARER_TOKEN: env.GQB_CONTROLLER_BEARER_TOKEN ? "[set]" : null
   };
 }
 

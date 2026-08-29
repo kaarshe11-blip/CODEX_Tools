@@ -61,6 +61,54 @@ test("embedded local mode refuses a simultaneously configured external controlle
   }
 });
 
+test("embedded local mode fails closed from env unless dev opt-in is explicit", async () => {
+  const tmp = tempPaths();
+  let bridge;
+  try {
+    bridge = GigTrackQueueBridge.fromEnv({
+      GQB_CONTROLLER_MODE: "embedded_local",
+      GQB_LOCAL_CONTROLLER_STATE_PATH: tmp.statePath,
+      GQB_JOURNAL_PATH: tmp.journalPath
+    });
+    const health = await bridge.queue_channel_health();
+    assert.equal(health.ok, false);
+    assert.equal(health.error_code, "CONTROLLER_DEV_MODE_REQUIRED");
+    assert.equal(health.data.controller_transport.kind, "embedded_local_disabled");
+    assert.equal(health.data.controller.ping_attempted, false);
+
+    const submit = await bridge.queue_submit({
+      request_id: "KAN-142-dev-mode-required",
+      name: "Should not create local production goal",
+      ordered_jira_keys: ["KAN-142"]
+    });
+    assert.equal(submit.ok, false);
+    assert.equal(submit.error_code, "CONTROLLER_DEV_MODE_REQUIRED");
+  } finally {
+    bridge?.journal?.close();
+    tmp.cleanup();
+  }
+});
+
+test("embedded local mode works from env only with explicit dev opt-in", async () => {
+  const tmp = tempPaths();
+  let bridge;
+  try {
+    bridge = GigTrackQueueBridge.fromEnv({
+      GQB_CONTROLLER_MODE: "embedded_local",
+      GQB_ALLOW_DEV_LOCAL_CONTROLLER: "true",
+      GQB_LOCAL_CONTROLLER_STATE_PATH: tmp.statePath,
+      GQB_JOURNAL_PATH: tmp.journalPath
+    });
+    const health = await bridge.queue_channel_health();
+    assert.equal(health.ok, true);
+    assert.equal(health.error_code, null);
+    assert.equal(health.data.controller_transport.kind, "embedded_local");
+  } finally {
+    bridge?.journal?.close();
+    tmp.cleanup();
+  }
+});
+
 test("embedded local controller can submit and authorize a local queue goal", async () => {
   const tmp = tempPaths();
   let journal;

@@ -6,9 +6,10 @@ The bridge is a queue-management facade over the private GigTrack controller soc
 
 ## Runtime
 
-- `GQB_CONTROLLER_SOCKET`: controller Unix socket path. Use only when the bridge process can see that socket.
+- `GQB_CONTROLLER_SOCKET`: controller Unix socket path. Use only when the bridge process can see that socket. In the GigTrack Replit workspace, the intended controller socket is `/home/runner/workspace/.mcp-local/controller.sock`.
 - `GQB_CONTROLLER_URL`: HTTP(S) controller MCP endpoint. If neither URL nor socket is explicitly configured, the bridge reports `CONTROLLER_UNCONFIGURED`.
-- `GQB_CONTROLLER_MODE=embedded_local`: opt-in local controller for Windows/offline use when no private controller endpoint is reachable. This uses a persisted local state file and does not contact Replit.
+- `GQB_CONTROLLER_MODE=embedded_local`: dev/test-only local controller. This mode is not production behavior, does not contact Replit, and must not be used as proof that the authoritative queue accepted work.
+- `GQB_ALLOW_DEV_LOCAL_CONTROLLER=true`: required opt-in before `embedded_local` can become healthy or accept mutating calls.
 - `GQB_LOCAL_CONTROLLER_STATE_PATH`: optional JSON state file for `embedded_local`; defaults to the local user state directory.
 - Do not combine `GQB_CONTROLLER_MODE=embedded_local` with `GQB_CONTROLLER_SOCKET` or `GQB_CONTROLLER_URL`, and do not set both external controller variables. The bridge reports `CONTROLLER_CONFIG_AMBIGUOUS` rather than choosing silently.
 - `GQB_JOURNAL_PATH`: required for production mutators. Points at the SQLite journal database.
@@ -35,8 +36,19 @@ GQB_NODE_PATH = 'C:\path\to\node.exe'
 GQB_JOURNAL_PATH = 'C:\Users\<user>\AppData\Local\gqb\queue.sqlite'
 GQB_DIAG_DIR = 'C:\Users\<user>\AppData\Local\gqb\diagnostics'
 GQB_LAUNCH_SOURCE = 'codex_client'
+GQB_CONTROLLER_SOCKET = '/home/runner/workspace/.mcp-local/controller.sock'
+```
+
+Do not use the socket example above from Windows Codex. Windows cannot open a Unix-domain socket inside the Replit Linux filesystem. If Codex runs on Windows, the bridge should fail closed until a real private control ingress exists or until the bridge itself runs in Replit beside the authoritative controller.
+
+For local dev/unit testing only:
+
+```toml
+[mcp_servers.gigtrack_queue_bridge.env]
 GQB_CONTROLLER_MODE = 'embedded_local'
+GQB_ALLOW_DEV_LOCAL_CONTROLLER = 'true'
 GQB_LOCAL_CONTROLLER_STATE_PATH = 'C:\Users\<user>\AppData\Local\gqb\controller-state.json'
+GQB_JOURNAL_PATH = 'C:\Users\<user>\AppData\Local\gqb\queue.sqlite'
 ```
 
 Diagnostics:
@@ -51,7 +63,7 @@ The doctor command scans Codex MCP config for `gigtrack_queue_bridge` or `gqb`, 
 The MCP server implements `tools/list` and `tools/call` for:
 
 - `queue_submit`
-- `queue_status
+- `queue_status`
 - `queue_preflight`
 - `queue_resume`
 - `queue_control`

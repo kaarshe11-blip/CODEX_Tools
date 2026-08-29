@@ -45,6 +45,7 @@ export class GigTrackQueueBridge {
           GQB_CONTROLLER_SOCKET: Boolean(env.GQB_CONTROLLER_SOCKET),
           GQB_CONTROLLER_URL: Boolean(env.GQB_CONTROLLER_URL),
           GQB_CONTROLLER_MODE: env.GQB_CONTROLLER_MODE ?? null,
+          GQB_ALLOW_DEV_LOCAL_CONTROLLER: env.GQB_ALLOW_DEV_LOCAL_CONTROLLER === "true",
           GQB_LOCAL_CONTROLLER_STATE_PATH: Boolean(env.GQB_LOCAL_CONTROLLER_STATE_PATH),
           GQB_JOURNAL_PATH: Boolean(env.GQB_JOURNAL_PATH),
           GQB_DIAG_DIR: Boolean(env.GQB_DIAG_DIR),
@@ -395,6 +396,7 @@ export class GigTrackQueueBridge {
 function transportDiagnosis(transport) {
   if (transport.kind === "none" || transport.kind === "invalid_url") return "CONTROLLER_UNCONFIGURED";
   if (transport.kind === "ambiguous") return "CONTROLLER_CONFIG_AMBIGUOUS";
+  if (transport.kind === "embedded_local_disabled") return "CONTROLLER_DEV_MODE_REQUIRED";
   return null;
 }
 
@@ -414,6 +416,18 @@ function controllerFromEnv(env, { logger }) {
           socket_configured: Boolean(env.GQB_CONTROLLER_SOCKET),
           url_configured: Boolean(env.GQB_CONTROLLER_URL),
           reason: "local_mode_with_external_controller"
+        }
+      });
+    }
+    if (env.GQB_ALLOW_DEV_LOCAL_CONTROLLER !== "true") {
+      return new DisabledLocalController({
+        logger,
+        message: "embedded local controller is dev/test only; set GQB_ALLOW_DEV_LOCAL_CONTROLLER=true to opt in",
+        transport: {
+          kind: "embedded_local_disabled",
+          mode_configured: LOCAL_CONTROLLER_MODE,
+          reason: "dev_opt_in_required",
+          state_path_configured: Boolean(env.GQB_LOCAL_CONTROLLER_STATE_PATH)
         }
       });
     }
@@ -451,6 +465,36 @@ class ConfigConflictController {
     throw new UpstreamError(this.message, {
       deterministic: true,
       mappedCode: "CONTROLLER_CONFIG_AMBIGUOUS",
+      preSend: true,
+      transport: this.transport
+    });
+  }
+}
+
+class DisabledLocalController {
+  constructor({ transport, message, logger = nullLogger() }) {
+    this.transport = transport;
+    this.message = message;
+    this.logger = logger;
+  }
+
+  describeTransport() {
+    return this.transport;
+  }
+
+  async ping() {
+    return {
+      reachable: false,
+      ping_attempted: false,
+      diagnosis: "CONTROLLER_DEV_MODE_REQUIRED",
+      message: this.message
+    };
+  }
+
+  async callTool() {
+    throw new UpstreamError(this.message, {
+      deterministic: true,
+      mappedCode: "CONTROLLER_DEV_MODE_REQUIRED",
       preSend: true,
       transport: this.transport
     });

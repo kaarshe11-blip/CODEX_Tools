@@ -248,6 +248,8 @@ function loadConfiguredMcpEnv(configPath, serverName) {
       "GQB_CONTROLLER_SOCKET",
       "GQB_CONTROLLER_URL",
       "GQB_CONTROLLER_BEARER_TOKEN",
+      "GQB_CONTROLLER_MODE",
+      "GQB_LOCAL_CONTROLLER_STATE_PATH",
       "GQB_DIAG_DIR",
       "GQB_JOURNAL_PATH",
       "GQB_LAUNCH_SOURCE",
@@ -288,12 +290,9 @@ export function rcaAssumptions({ configScan, launchProbe, nodePath, health }) {
     controller_unreachable: controllerDiagnosis === "CONTROLLER_UNCONFIGURED"
       ? unknown("transport was not configured, so reachability was not tested")
       : verdict(Boolean(health?.data?.controller?.ping_attempted), controllerDiagnosis === "CONTROLLER_UNREACHABLE", "gqb.controller.ping.completed"),
-    health_false_green_detected: verdict(
-      Boolean(health?.data?.controller?.ping_attempted),
-      Boolean(health?.ok && health?.data?.controller?.reachable === false),
-      "gqb.health.completed",
-      "controller ping did not run"
-    ),
+    health_false_green_detected: health?.data?.controller?.ping_attempted
+      ? verdict(true, Boolean(health?.ok && health?.data?.controller?.reachable === false), "gqb.health.completed")
+      : unknown("controller ping did not run"),
     node_unavailable_on_path: verdict(true, nodePath.available === false, "gqb.launch.probe.completed")
   };
 }
@@ -316,6 +315,8 @@ function redactedEnvironmentSummary(env) {
   return {
     GQB_CONTROLLER_SOCKET: env.GQB_CONTROLLER_SOCKET ? "[set]" : null,
     GQB_CONTROLLER_URL: env.GQB_CONTROLLER_URL ? redactedUrl(env.GQB_CONTROLLER_URL) : null,
+    GQB_CONTROLLER_MODE: env.GQB_CONTROLLER_MODE ?? null,
+    GQB_LOCAL_CONTROLLER_STATE_PATH: env.GQB_LOCAL_CONTROLLER_STATE_PATH ?? null,
     GQB_JOURNAL_PATH: env.GQB_JOURNAL_PATH ?? null,
     GQB_DIAG_DIR: env.GQB_DIAG_DIR ?? null,
     GQB_LAUNCH_SOURCE: env.GQB_LAUNCH_SOURCE ?? null,

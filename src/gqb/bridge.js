@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { CHANNEL, EFFECT_STATUS } from "./constants.js";
 import { ControllerClient, UpstreamError } from "./controller-client.js";
 import { DiagnosticsLogger, nullLogger } from "./diagnostics.js";
+import { LOCAL_CONTROLLER_MODE, LocalController } from "./local-controller.js";
 import { statusFingerprint } from "./fingerprint.js";
 import { JournalError, SqliteJournal } from "./journal.js";
 import { queueControl, queueResume, resumeGateVerdict } from "./operations/owner-decision.js";
@@ -34,7 +35,7 @@ export class GigTrackQueueBridge {
   static fromEnv(env = process.env, { logger = null } = {}) {
     const diagnostics = logger ?? new DiagnosticsLogger({ origin: env.GQB_LAUNCH_SOURCE || "unknown" });
     const journal = env.GQB_JOURNAL_PATH ? new SqliteJournal({ path: env.GQB_JOURNAL_PATH }) : null;
-    const controller = ControllerClient.fromEnv(env, { logger: diagnostics });
+    const controller = controllerFromEnv(env, { logger: diagnostics });
     const transport = controller.describeTransport();
     diagnostics.event("gqb.transport.selected", {
       diagnosis: transportDiagnosis(transport),
@@ -43,6 +44,8 @@ export class GigTrackQueueBridge {
         env_present: {
           GQB_CONTROLLER_SOCKET: Boolean(env.GQB_CONTROLLER_SOCKET),
           GQB_CONTROLLER_URL: Boolean(env.GQB_CONTROLLER_URL),
+          GQB_CONTROLLER_MODE: env.GQB_CONTROLLER_MODE ?? null,
+          GQB_LOCAL_CONTROLLER_STATE_PATH: Boolean(env.GQB_LOCAL_CONTROLLER_STATE_PATH),
           GQB_JOURNAL_PATH: Boolean(env.GQB_JOURNAL_PATH),
           GQB_DIAG_DIR: Boolean(env.GQB_DIAG_DIR),
           GQB_LAUNCH_SOURCE: Boolean(env.GQB_LAUNCH_SOURCE)
@@ -395,5 +398,10 @@ function transportDiagnosis(transport) {
 }
 
 function transportCanAttempt(transport) {
-  return transport.kind === "socket" || transport.kind === "http" || transport.kind === "existing_remote";
+  return transport.kind === "socket" || transport.kind === "http" || transport.kind === "existing_remote" || transport.kind === LOCAL_CONTROLLER_MODE;
+}
+
+function controllerFromEnv(env, { logger }) {
+  if (env.GQB_CONTROLLER_MODE === LOCAL_CONTROLLER_MODE) return LocalController.fromEnv(env, { logger });
+  return ControllerClient.fromEnv(env, { logger });
 }

@@ -249,6 +249,7 @@ function loadConfiguredMcpEnv(configPath, serverName) {
       "GQB_CONTROLLER_URL",
       "GQB_CONTROLLER_BEARER_TOKEN",
       "GQB_CONTROLLER_MODE",
+      "GQB_ALLOW_DEV_LOCAL_CONTROLLER",
       "GQB_LOCAL_CONTROLLER_STATE_PATH",
       "GQB_DIAG_DIR",
       "GQB_JOURNAL_PATH",
@@ -279,14 +280,19 @@ function parseTomlString(value) {
 
 export function rcaAssumptions({ configScan, launchProbe, nodePath, health }) {
   const controllerDiagnosis = health?.data?.controller?.diagnosis ?? health?.error_code ?? null;
+  const healthProbeFailed = controllerDiagnosis === "DOCTOR_HEALTH_PROBE_FAILED";
+  const transportAssumption = (condition) => healthProbeFailed
+    ? unknown("health probe failed before transport diagnosis was available")
+    : verdict(Boolean(health?.data?.controller), condition, "gqb.transport.selected");
   return {
     config_entry_missing_or_invalid: configScan.missing
       ? verdict(true, true, "gqb.config.scan.completed", configScan.reason)
       : verdict(configScan.readable, !configScan.valid, "gqb.config.scan.completed", configScan.reason),
     launch_command_unresolved: verdict(configScan.valid, launchProbe.diagnosis === "MCP_LAUNCH_FAILED", "gqb.launch.probe.completed", configScan.valid ? null : "MCP config was not valid, so configured command could not be assessed"),
     stdio_mcp_ready: verdict(true, launchProbe.ok, "gqb.launch.probe.completed"),
-    controller_transport_unconfigured: verdict(true, controllerDiagnosis === "CONTROLLER_UNCONFIGURED", "gqb.transport.selected"),
-    controller_config_ambiguous: verdict(true, controllerDiagnosis === "CONTROLLER_CONFIG_AMBIGUOUS", "gqb.transport.selected"),
+    controller_transport_unconfigured: transportAssumption(controllerDiagnosis === "CONTROLLER_UNCONFIGURED"),
+    controller_config_ambiguous: transportAssumption(controllerDiagnosis === "CONTROLLER_CONFIG_AMBIGUOUS"),
+    embedded_local_dev_opt_in_missing: transportAssumption(controllerDiagnosis === "CONTROLLER_DEV_MODE_REQUIRED"),
     controller_unreachable: controllerDiagnosis === "CONTROLLER_UNCONFIGURED"
       ? unknown("transport was not configured, so reachability was not tested")
       : verdict(Boolean(health?.data?.controller?.ping_attempted), controllerDiagnosis === "CONTROLLER_UNREACHABLE", "gqb.controller.ping.completed"),
@@ -316,6 +322,7 @@ function redactedEnvironmentSummary(env) {
     GQB_CONTROLLER_SOCKET: env.GQB_CONTROLLER_SOCKET ? "[set]" : null,
     GQB_CONTROLLER_URL: env.GQB_CONTROLLER_URL ? redactedUrl(env.GQB_CONTROLLER_URL) : null,
     GQB_CONTROLLER_MODE: env.GQB_CONTROLLER_MODE ?? null,
+    GQB_ALLOW_DEV_LOCAL_CONTROLLER: env.GQB_ALLOW_DEV_LOCAL_CONTROLLER ?? null,
     GQB_LOCAL_CONTROLLER_STATE_PATH: env.GQB_LOCAL_CONTROLLER_STATE_PATH ?? null,
     GQB_JOURNAL_PATH: env.GQB_JOURNAL_PATH ?? null,
     GQB_DIAG_DIR: env.GQB_DIAG_DIR ?? null,

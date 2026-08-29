@@ -27,6 +27,7 @@ export class LocalController {
 
   async ping() {
     const result = await this.callTool("get_goal_status", { includeEvents: false, eventLimit: 1 });
+    this.writeState(this.readState());
     return {
       reachable: true,
       ping_attempted: true,

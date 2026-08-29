@@ -90,6 +90,7 @@ export const JOURNAL_PHASE = Object.freeze({
 });
 
 export const CHANNEL = Object.freeze({
+  EMBEDDED_LOCAL: "EMBEDDED_LOCAL",
   LOCAL_SOCKET: "LOCAL_SOCKET",
   PUBLIC_DECLARED: "PUBLIC_DECLARED"
 });

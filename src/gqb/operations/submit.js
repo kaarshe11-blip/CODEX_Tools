@@ -141,7 +141,7 @@ export async function queueSubmit(bridge, args = {}) {
       }
     });
   } catch (error) {
-    return bridge.errorEnvelope(error, traceId);
+    return bridge.errorEnvelope(error, traceId, { tool: "queue_submit" });
   } finally {
     if (lock) bridge.journal?.releaseLock(lock);
   }

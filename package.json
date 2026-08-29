@@ -5,7 +5,8 @@
   "type": "module",
   "description": "Codex-built tools, including the GigTrack Queue Bridge MCP server.",
   "bin": {
-    "gigtrack-queue-bridge": "./bin/gqb-mcp.js"
+    "gigtrack-queue-bridge": "./bin/gqb-mcp.js",
+    "gqb-doctor": "./bin/gqb-doctor.js"
   },
   "scripts": {
     "test": "node --test",

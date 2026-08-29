@@ -37,7 +37,7 @@ export async function queueReconcile(bridge, args = {}) {
       data: { mode, upstream_result: result }
     });
   } catch (error) {
-    return bridge.errorEnvelope(error, traceId);
+    return bridge.errorEnvelope(error, traceId, { tool: "queue_reconcile", goalId: args.goal_id });
   } finally {
     if (lock) bridge.journal?.releaseLock(lock);
   }

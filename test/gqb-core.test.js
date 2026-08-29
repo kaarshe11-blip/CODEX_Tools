@@ -6,11 +6,13 @@ import { join } from "node:path";
 import {
   authorizationRequestId,
   canonicalJson,
+  ControllerClient,
   deriveNextSafeAction,
   GigTrackQueueBridge,
   normalizeRequestId,
   payloadHash,
   JournalError,
+  rcaAssumptions,
   SqliteJournal,
   statusFingerprint
 } from "../src/gqb/index.js";
@@ -20,6 +22,20 @@ class FakeController {
     this.calls = [];
     this.status = { goal: null, tasks: [], current_dispatch: null, events: [] };
     this.mutatorResult = { goal_state: "running", event_ordinal: 2, dispatch_created: true, dispatch_authorized: false };
+  }
+
+  describeTransport() {
+    return { kind: "socket", socket_path: "/tmp/controller.sock" };
+  }
+
+  async ping() {
+    const result = await this.callTool("get_goal_status", { includeEvents: false, eventLimit: 1 });
+    return {
+      reachable: true,
+      diagnosis: null,
+      upstream_shape: { has_goal: Object.hasOwn(result, "goal"), has_tasks: Array.isArray(result.tasks), has_events: Array.isArray(result.events) },
+      idle_goal_null_accepted: result.goal === null
+    };
   }
 
   async callTool(name, args) {
@@ -65,6 +81,24 @@ class SequenceController {
     if (next instanceof Error) throw next;
     if (typeof next === "function") return next(name, args, this);
     return next;
+  }
+}
+
+class FailingController {
+  constructor(error) {
+    this.error = error;
+  }
+
+  describeTransport() {
+    return { kind: "socket", socket_path: "/missing/controller.sock" };
+  }
+
+  async ping() {
+    return { reachable: false, diagnosis: "CONTROLLER_UNREACHABLE", message: this.error.message };
+  }
+
+  async callTool() {
+    throw this.error;
   }
 }
 
@@ -140,6 +174,101 @@ test("handoff mutation is refused without upstream CAS or correlation capability
   assert.equal(result.ok, false);
   assert.equal(result.error_code, "UPSTREAM_CAPABILITY_REQUIRED");
   assert.equal(result.effect_status, "NOT_APPLIED");
+});
+
+test("controller client has no implicit Replit socket default", async () => {
+  const controller = new ControllerClient();
+  assert.deepEqual(controller.describeTransport(), { kind: "none" });
+  await assert.rejects(
+    () => controller.callTool("get_goal_status", {}),
+    (error) => {
+      assert.equal(error.mappedCode, "CONTROLLER_UNCONFIGURED");
+      assert.equal(error.deterministic, true);
+      return true;
+    }
+  );
+});
+
+test("queue_channel_health cannot report ok without controller transport", async () => {
+  const tmp = tempJournal();
+  let journal;
+  try {
+    journal = new SqliteJournal({ path: tmp.path }).open();
+    const bridge = new GigTrackQueueBridge({ controller: new ControllerClient(), journal });
+    const result = await bridge.queue_channel_health();
+    assert.equal(result.ok, false);
+    assert.equal(result.error_code, "CONTROLLER_UNCONFIGURED");
+    assert.equal(result.data.journal.available, true);
+    assert.equal(result.data.controller.reachable, false);
+  } finally {
+    journal?.close();
+    tmp.cleanup();
+  }
+});
+
+test("queue_channel_health pings controller before reporting ready", async () => {
+  const tmp = tempJournal();
+  let journal;
+  try {
+    const controller = new FakeController();
+    journal = new SqliteJournal({ path: tmp.path }).open();
+    const bridge = new GigTrackQueueBridge({ controller, journal });
+    const result = await bridge.queue_channel_health();
+    assert.equal(result.ok, true);
+    assert.equal(result.error_code, null);
+    assert.equal(result.data.controller.reachable, true);
+    assert.equal(controller.calls[0].name, "get_goal_status");
+  } finally {
+    journal?.close();
+    tmp.cleanup();
+  }
+});
+
+test("queue_channel_health reports unreachable controller as not ready", async () => {
+  const tmp = tempJournal();
+  let journal;
+  try {
+    journal = new SqliteJournal({ path: tmp.path }).open();
+    const bridge = new GigTrackQueueBridge({
+      controller: new FailingController(Object.assign(new Error("connect ENOENT /missing/controller.sock"), {
+        mappedCode: "CONTROLLER_UNREACHABLE",
+        deterministic: true
+      })),
+      journal
+    });
+    const result = await bridge.queue_channel_health();
+    assert.equal(result.ok, false);
+    assert.equal(result.error_code, "CONTROLLER_UNREACHABLE");
+    assert.equal(result.data.controller.reachable, false);
+  } finally {
+    journal?.close();
+    tmp.cleanup();
+  }
+});
+
+test("doctor RCA assumptions preserve unknown instead of false green booleans", () => {
+  const assumptions = rcaAssumptions({
+    configScan: { readable: true, valid: false, reason: "missing" },
+    launchProbe: { ok: true, diagnosis: null },
+    nodePath: { available: false },
+    health: {
+      ok: false,
+      error_code: "CONTROLLER_UNCONFIGURED",
+      data: {
+        controller: {
+          ping_attempted: false,
+          reachable: false,
+          diagnosis: "CONTROLLER_UNCONFIGURED"
+        }
+      }
+    }
+  });
+  assert.equal(assumptions.config_entry_missing_or_invalid.verdict, "confirmed");
+  assert.equal(assumptions.launch_command_unresolved.verdict, "unknown");
+  assert.equal(assumptions.controller_transport_unconfigured.verdict, "confirmed");
+  assert.equal(assumptions.controller_unreachable.verdict, "unknown");
+  assert.equal(assumptions.health_false_green_detected.verdict, "unknown");
+  assert.equal(assumptions.node_unavailable_on_path.verdict, "confirmed");
 });
 
 test("queue_submit journals presubmit intent and deterministic authorization entry after goal id resolves", async () => {

@@ -133,7 +133,7 @@ export async function ownerDecisionMutation(bridge, args, { allowedKinds, isResu
       }
     });
   } catch (error) {
-    return bridge.errorEnvelope(error, traceId);
+    return bridge.errorEnvelope(error, traceId, { tool: isResume ? "queue_resume" : "queue_control", goalId: args.goal_id });
   } finally {
     if (lock) bridge.journal?.releaseLock(lock);
   }

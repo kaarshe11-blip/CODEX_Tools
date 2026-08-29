@@ -8,6 +8,7 @@ Thumbs.db
 *.log
 tmp/
 temp/
+work/
 
 # Environment files
 .env

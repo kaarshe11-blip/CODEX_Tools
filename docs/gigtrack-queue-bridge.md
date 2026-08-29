@@ -8,6 +8,7 @@ The bridge is a queue-management facade over the private GigTrack controller soc
 
 - `GQB_CONTROLLER_SOCKET`: controller Unix socket path. Use only when the bridge process can see that socket.
 - `GQB_CONTROLLER_URL`: HTTP(S) controller MCP endpoint. If neither URL nor socket is explicitly configured, the bridge reports `CONTROLLER_UNCONFIGURED`.
+- Do not set both controller variables. The bridge reports `CONTROLLER_CONFIG_AMBIGUOUS` rather than choosing silently.
 - `GQB_JOURNAL_PATH`: required for production mutators. Points at the SQLite journal database.
 - `GQB_DIAG_DIR`: optional diagnostics directory for append-only JSONL events.
 - `GQB_LAUNCH_SOURCE`: optional launch origin label, for example `codex_client`.

@@ -1,11 +1,12 @@
 import { appendFileSync, chmodSync, existsSync, mkdirSync, renameSync, statSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { homedir, platform } from "node:os";
 import { dirname, join } from "node:path";
 import { stderr } from "node:process";
 
 const DEFAULT_MAX_BYTES = 10 * 1024 * 1024;
 const DEFAULT_RETAINED_FILES = 10;
-const SECRET_RE = /(token|secret|key|authorization|password|cookie|credential|bearer)/i;
+const SECRET_RE = /\b(?:token|secret|api[_-]?key|authorization|password|cookie|credential|bearer|auth|jwt|private[_-]?key|passphrase|signature|pwd)\b/i;
 
 export function diagnosticsDirFromEnv(env = process.env) {
   if (env.GQB_DIAG_DIR) return env.GQB_DIAG_DIR;
@@ -15,20 +16,27 @@ export function diagnosticsDirFromEnv(env = process.env) {
   return join(homedir(), ".gqb", "diagnostics");
 }
 
-export function redact(value) {
+export function redact(value, seen = new WeakSet()) {
   if (value === null || typeof value === "undefined") return value;
-  if (Array.isArray(value)) return value.map((item) => redact(item));
+  if (typeof value === "bigint") return `${value}n`;
+  if (Array.isArray(value)) {
+    if (seen.has(value)) return "[Circular]";
+    seen.add(value);
+    return value.map((item) => redact(item, seen));
+  }
   if (value instanceof Error) {
     return {
       name: value.name,
-      message: value.message,
+      message: redact(value.message, seen),
       code: value.code ?? null
     };
   }
   if (typeof value === "object") {
+    if (seen.has(value)) return "[Circular]";
+    seen.add(value);
     return Object.fromEntries(Object.entries(value).map(([key, inner]) => [
       key,
-      SECRET_RE.test(key) ? "[REDACTED]" : redact(inner)
+      SECRET_RE.test(key) ? "[REDACTED]" : redact(inner, seen)
     ]));
   }
   if (typeof value === "string" && /^https?:\/\//i.test(value)) {
@@ -38,6 +46,13 @@ export function redact(value) {
     } catch {
       return "[REDACTED_URL]";
     }
+  }
+  if (typeof value === "string") {
+    return value
+      .replace(/(bearer\s+)[A-Za-z0-9._~+/=-]+/gi, "$1[REDACTED]")
+      .replace(/(:\/\/)([^/\s:@]+):([^@\s]+)@/gi, "$1[REDACTED]@[redacted]")
+      .replace(/(\b(?:token|access[_-]?token|api[_-]?key|password|secret)\s*[=:]\s*)[^\s,;]+/gi, "$1[REDACTED]")
+      .replace(/\b[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, "[REDACTED_JWT]");
   }
   return value;
 }
@@ -71,18 +86,37 @@ export class DiagnosticsLogger {
     details = {},
     component = this.component
   } = {}) {
-    const entry = {
-      event,
-      ts: new Date().toISOString(),
-      component,
-      trace_id: traceId,
-      instance_id: this.instanceId,
-      pid: this.pid,
-      level,
-      diagnosis,
-      details: redact(details)
-    };
-    const line = JSON.stringify(entry);
+    let entry;
+    let line;
+    try {
+      entry = {
+        event,
+        ts: new Date().toISOString(),
+        component,
+        origin: this.origin,
+        trace_id: traceId,
+        instance_id: this.instanceId,
+        pid: this.pid,
+        level,
+        diagnosis,
+        details: redact(details)
+      };
+      line = JSON.stringify(entry);
+    } catch (error) {
+      entry = {
+        event: "gqb.log.serialization.failed",
+        ts: new Date().toISOString(),
+        component,
+        origin: this.origin,
+        trace_id: traceId,
+        instance_id: this.instanceId,
+        pid: this.pid,
+        level: "warn",
+        diagnosis: "LOG_SERIALIZATION_FAILED",
+        details: { message: String(error?.message ?? error) }
+      };
+      line = JSON.stringify(entry);
+    }
     try {
       this.stderrWriter(line);
     } catch {
@@ -140,7 +174,7 @@ function sanitizeFilePart(value) {
 }
 
 function cryptoRandomId() {
-  return `${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`;
+  return randomUUID();
 }
 
 function safeChmod(path, mode) {

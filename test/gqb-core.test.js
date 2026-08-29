@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import http from "node:http";
+import { once } from "node:events";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -257,6 +259,35 @@ test("controller client rejects unsupported URL schemes and ambiguous transport 
   );
 });
 
+test("controller HTTP transport records auth and reached-server failures", async () => {
+  const events = [];
+  const server = http.createServer((request, response) => {
+    if (request.url === "/auth") response.writeHead(401).end("unauthorized");
+    else response.writeHead(500).end("controller failed");
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const port = server.address().port;
+  try {
+    const logger = { event: (event, payload) => events.push({ event, payload }) };
+    const auth = new ControllerClient({ url: `http://127.0.0.1:${port}/auth`, bearerToken: "secret", logger });
+    const authPing = await auth.ping({ traceId: "auth-trace" });
+    assert.equal(authPing.diagnosis, "CONTROLLER_AUTH_REJECTED");
+    assert.equal(authPing.ping_attempted, true);
+    assert.equal(events.at(-1).event, "gqb.controller.auth.rejected");
+    assert.equal(events.at(-1).payload.traceId, "auth-trace");
+
+    const failed = new ControllerClient({ url: `http://127.0.0.1:${port}/mcp`, logger });
+    const failedPing = await failed.ping({ traceId: "server-trace" });
+    assert.equal(failedPing.diagnosis, "CONTROLLER_UPSTREAM_ERROR");
+    assert.equal(failedPing.ping_attempted, true);
+    assert.equal(events.at(-1).event, "gqb.transport.request.failed");
+  } finally {
+    server.close();
+    await once(server, "close");
+  }
+});
+
 test("queue_channel_health cannot report ok without controller transport", async () => {
   const tmp = tempJournal();
   let journal;
@@ -286,6 +317,24 @@ test("queue_channel_health pings controller before reporting ready", async () =>
     assert.equal(result.error_code, null);
     assert.equal(result.data.controller.reachable, true);
     assert.equal(controller.calls[0].name, "get_goal_status");
+  } finally {
+    journal?.close();
+    tmp.cleanup();
+  }
+});
+
+test("queue_channel_health correlates transport, ping, health, and response trace IDs", async () => {
+  const tmp = tempJournal();
+  let journal;
+  try {
+    const events = [];
+    journal = new SqliteJournal({ path: tmp.path }).open();
+    const bridge = new GigTrackQueueBridge({ controller: new FakeController(), journal, logger: { event: (event, payload) => events.push({ event, payload }) } });
+    const result = await bridge.queue_channel_health();
+    const traceIds = events.map(({ payload }) => payload.traceId);
+    assert.ok(result.trace_id);
+    assert.ok(traceIds.every((traceId) => traceId === result.trace_id));
+    assert.deepEqual(events.map(({ event }) => event), ["gqb.transport.selected", "gqb.controller.ping.completed", "gqb.health.completed"]);
   } finally {
     journal?.close();
     tmp.cleanup();

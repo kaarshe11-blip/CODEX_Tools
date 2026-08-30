@@ -116,6 +116,20 @@ function tempJournal() {
   };
 }
 
+async function readBody(request) {
+  let body = "";
+  request.setEncoding("utf8");
+  request.on("data", (chunk) => {
+    body += chunk;
+  });
+  await once(request, "end");
+  return body;
+}
+
+function jsonRpcSuccess(id, result) {
+  return JSON.stringify({ jsonrpc: "2.0", id, result });
+}
+
 function runningStatus(overrides = {}) {
   return {
     goal: {
@@ -563,6 +577,49 @@ test("submit HTTP 5xx after send remains open for reconcile", async () => {
   } finally {
     journal?.close();
     tmp.cleanup();
+  }
+});
+
+test("submit rejects MCP content-only result before journaling applied", async () => {
+  const tmp = tempJournal();
+  let journal;
+  const server = http.createServer(async (request, response) => {
+    const body = JSON.parse(await readBody(request));
+    if (body.params.name === "get_goal_status") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(jsonRpcSuccess(body.id, { goal: null, tasks: [], current_dispatch: null, events: [] }));
+      return;
+    }
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(jsonRpcSuccess(body.id, { content: [{ type: "text", text: "{\"goal_id\":\"real-goal-7\"}" }] }));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  try {
+    journal = new SqliteJournal({ path: tmp.path }).open();
+    const controller = new ControllerClient({ url: `http://127.0.0.1:${server.address().port}/mcp` });
+    const bridge = new GigTrackQueueBridge({ controller, journal });
+    const result = await bridge.queue_submit({
+      request_id: "KAN-142-content-only",
+      name: "Build Queue Bridge",
+      ordered_jira_keys: ["KAN-142"]
+    });
+    assert.equal(result.error_code, "CONTROLLER_UNEXPECTED_RESULT_SHAPE");
+    assert.equal(result.effect_status, "INDETERMINATE");
+    assert.equal(result.next_safe_action.code, "RECONCILE_BRIDGE_UNCERTAINTY");
+
+    const replay = await bridge.queue_submit({
+      request_id: "KAN-142-content-only",
+      name: "Build Queue Bridge",
+      ordered_jira_keys: ["KAN-142"]
+    });
+    assert.equal(replay.error_code, "RECONCILE_BRIDGE_UNCERTAINTY");
+    assert.equal(replay.effect_status, "INDETERMINATE");
+  } finally {
+    journal?.close();
+    tmp.cleanup();
+    server.close();
+    await once(server, "close");
   }
 });
 

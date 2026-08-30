@@ -69,11 +69,62 @@ test("controller client parses ordinary JSON success responses", async () => {
   });
 });
 
+test("controller client unwraps MCP structuredContent results", async () => {
+  await withServer(async (request, response) => {
+    const body = JSON.parse(await readBody(request));
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      jsonrpc: "2.0",
+      id: body.id,
+      result: {
+        content: [{ type: "text", text: "ok" }],
+        structuredContent: SUCCESS_RESULT
+      }
+    }));
+  }, async (baseUrl) => {
+    const client = new ControllerClient({ url: `${baseUrl}/mcp` });
+    assert.deepEqual(await client.callTool("get_goal_status", {}), SUCCESS_RESULT);
+  });
+});
+
+test("controller client rejects MCP content-only results", async () => {
+  await withServer(async (request, response) => {
+    const body = JSON.parse(await readBody(request));
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      jsonrpc: "2.0",
+      id: body.id,
+      result: { content: [{ type: "text", text: "{\"goal_id\":\"goal-1\"}" }] }
+    }));
+  }, async (baseUrl) => {
+    const client = new ControllerClient({ url: `${baseUrl}/mcp` });
+    await assert.rejects(
+      () => client.callTool("submit_goal", { requestId: "gqb:req-content-only" }),
+      (error) => {
+        assert.equal(error.mappedCode, "CONTROLLER_UNEXPECTED_RESULT_SHAPE");
+        assert.equal(error.indeterminate, true);
+        return true;
+      }
+    );
+  });
+});
+
 test("controller client parses SSE success responses and tolerates comments", async () => {
   await withServer(async (request, response) => {
     const body = JSON.parse(await readBody(request));
     response.writeHead(200, { "content-type": "text/event-stream" });
     response.end(`: keepalive\n\nevent: message\ndata: ${jsonRpcSuccess(body.id)}\n\n`);
+  }, async (baseUrl) => {
+    const client = new ControllerClient({ url: `${baseUrl}/mcp` });
+    assert.deepEqual(await client.callTool("get_goal_status", {}), SUCCESS_RESULT);
+  });
+});
+
+test("controller client skips SSE non-JSON keepalives before a valid response", async () => {
+  await withServer(async (request, response) => {
+    const body = JSON.parse(await readBody(request));
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(`event: ping\ndata: ping\n\nevent: message\ndata: ${jsonRpcSuccess(body.id)}\n\n`);
   }, async (baseUrl) => {
     const client = new ControllerClient({ url: `${baseUrl}/mcp` });
     assert.deepEqual(await client.callTool("get_goal_status", {}), SUCCESS_RESULT);
@@ -281,6 +332,38 @@ test("missing required M2M configuration fails closed", async () => {
   const client = new ControllerClient({
     url: "http://127.0.0.1:1/mcp",
     auth0: { clientId: "client-id", clientSecret: "client-secret", audience: "https://mcp-dev.kaarsheapps.online" }
+  });
+  await assert.rejects(
+    () => client.callTool("get_goal_status", {}),
+    (error) => {
+      assert.equal(error.mappedCode, "AUTH0_M2M_CONFIG_INCOMPLETE");
+      assert.equal(error.preSend, true);
+      return true;
+    }
+  );
+});
+
+test("credentialed controller requests require HTTPS unless loopback", async () => {
+  const client = new ControllerClient({ url: "http://controller.example/mcp", bearerToken: "static-token" });
+  await assert.rejects(
+    () => client.callTool("get_goal_status", {}),
+    (error) => {
+      assert.equal(error.mappedCode, "CONTROLLER_INVALID_URL");
+      assert.equal(error.preSend, true);
+      return true;
+    }
+  );
+});
+
+test("Auth0 token endpoint requires HTTPS unless loopback", async () => {
+  const client = new ControllerClient({
+    url: "https://controller.example/mcp",
+    auth0: {
+      tokenUrl: "http://auth.example/oauth/token",
+      clientId: "client-id",
+      clientSecret: "client-secret",
+      audience: "https://mcp-dev.kaarsheapps.online"
+    }
   });
   await assert.rejects(
     () => client.callTool("get_goal_status", {}),

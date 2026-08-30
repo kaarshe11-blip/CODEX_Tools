@@ -114,6 +114,23 @@ test("controller client rejects mismatched JSON-RPC response IDs", async () => {
   });
 });
 
+test("controller HTTP 5xx after send is indeterminate", async () => {
+  await withServer(async (_request, response) => {
+    response.writeHead(504).end("gateway timeout");
+  }, async (baseUrl) => {
+    const client = new ControllerClient({ url: `${baseUrl}/mcp` });
+    await assert.rejects(
+      () => client.callTool("submit_goal", { requestId: "gqb:req-504" }),
+      (error) => {
+        assert.equal(error.mappedCode, "CONTROLLER_UPSTREAM_ERROR");
+        assert.equal(error.indeterminate, true);
+        assert.equal(error.deterministic, false);
+        return true;
+      }
+    );
+  });
+});
+
 for (const [status, mappedCode] of [
   [401, "CONTROLLER_AUTH_REJECTED"],
   [403, "CONTROLLER_AUTHORIZATION_REJECTED"],
@@ -306,6 +323,40 @@ test("Auth0 token response missing mcp:controller fails closed when scope is sup
         return true;
       }
     );
+  });
+});
+
+test("Auth0 token response missing scope fails closed", async () => {
+  await withServer(async (_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ access_token: "no-scope", token_type: "Bearer", expires_in: 100 }));
+  }, async (baseUrl) => {
+    const client = new ControllerClient({ url: `${baseUrl}/mcp`, auth0: auth0Config(baseUrl) });
+    await assert.rejects(
+      () => client.callTool("get_goal_status", {}),
+      (error) => {
+        assert.equal(error.mappedCode, "AUTH0_TOKEN_MISSING_REQUIRED_SCOPE");
+        assert.equal(error.preSend, true);
+        return true;
+      }
+    );
+  });
+});
+
+test("Auth0 token acquisition honors per-call timeout", async () => {
+  await withServer(async (request, response) => {
+    if (request.url === "/oauth/token") {
+      await readBody(request);
+      return;
+    }
+    response.writeHead(500).end("controller should not be called");
+  }, async (baseUrl) => {
+    const client = new ControllerClient({ url: `${baseUrl}/mcp`, auth0: auth0Config(baseUrl), timeoutMs: 30000 });
+    const startedAt = Date.now();
+    const ping = await client.ping({ timeoutMs: 50 });
+    assert.equal(ping.diagnosis, "AUTH0_TOKEN_ACQUISITION_FAILED");
+    assert.equal(ping.ping_attempted, false);
+    assert.ok(Date.now() - startedAt < 1000);
   });
 });
 

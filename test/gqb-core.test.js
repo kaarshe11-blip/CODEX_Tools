@@ -19,7 +19,8 @@ import {
   rcaAssumptions,
   scanCodexConfig,
   SqliteJournal,
-  statusFingerprint
+  statusFingerprint,
+  UpstreamError
 } from "../src/gqb/index.js";
 
 class FakeController {
@@ -522,6 +523,43 @@ test("created=false submit with failed post-read stays indeterminate and does no
     assert.equal(result.error_code, "UPSTREAM_INDETERMINATE");
     assert.equal(result.effect_status, "INDETERMINATE");
     assert.equal(controller.calls.filter((call) => call.name === "submit_owner_decision").length, 0);
+  } finally {
+    journal?.close();
+    tmp.cleanup();
+  }
+});
+
+test("submit HTTP 5xx after send remains open for reconcile", async () => {
+  const tmp = tempJournal();
+  let journal;
+  try {
+    journal = new SqliteJournal({ path: tmp.path }).open();
+    const controller = new SequenceController([
+      { goal: null, tasks: [], current_dispatch: null, events: [] },
+      new UpstreamError("controller HTTP 504", {
+        mappedCode: "CONTROLLER_UPSTREAM_ERROR",
+        statusCode: 504,
+        indeterminate: true,
+        deterministic: false
+      })
+    ]);
+    const bridge = new GigTrackQueueBridge({ controller, journal });
+    const result = await bridge.queue_submit({
+      request_id: "KAN-142-gateway-timeout",
+      name: "Build Queue Bridge",
+      ordered_jira_keys: ["KAN-142"]
+    });
+    assert.equal(result.error_code, "CONTROLLER_UPSTREAM_ERROR");
+    assert.equal(result.effect_status, "INDETERMINATE");
+    assert.equal(result.next_safe_action.code, "RECONCILE_BRIDGE_UNCERTAINTY");
+
+    const replay = await bridge.queue_submit({
+      request_id: "KAN-142-gateway-timeout",
+      name: "Build Queue Bridge",
+      ordered_jira_keys: ["KAN-142"]
+    });
+    assert.equal(replay.error_code, "RECONCILE_BRIDGE_UNCERTAINTY");
+    assert.equal(replay.effect_status, "INDETERMINATE");
   } finally {
     journal?.close();
     tmp.cleanup();

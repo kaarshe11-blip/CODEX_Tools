@@ -191,7 +191,7 @@ export class ControllerClient {
         mappedCode: "CONTROLLER_MALFORMED_JSON_RESPONSE"
       });
     }
-    return response.result;
+    return normalizeControllerToolResult(name, response.result);
   }
 
   async sendControllerRequest({ name, body, transport, timeoutMs, traceId }) {
@@ -218,8 +218,12 @@ export class ControllerClient {
   }
 
   async authorizationForTransport(transport, traceId = null, timeoutMs = this.timeoutMs) {
-    if (this.bearerToken) return { source: "static_bearer", header: `Bearer ${this.bearerToken}` };
+    if (this.bearerToken) {
+      validateCredentialTransport(transport, this.url);
+      return { source: "static_bearer", header: `Bearer ${this.bearerToken}` };
+    }
     if (!this.auth0 || !["http", "existing_remote"].includes(transport.kind)) return { source: "none", header: null };
+    validateCredentialTransport(transport, this.url);
     const token = await this.getAccessToken(traceId, timeoutMs);
     return { source: "auth0_client_credentials", header: `Bearer ${token}` };
   }
@@ -446,6 +450,9 @@ function validateAuth0Config(auth0) {
   try {
     const parsed = new URL(auth0.tokenUrl);
     if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("unsupported token endpoint protocol");
+    if (parsed.protocol !== "https:" && !isLoopbackHost(parsed.hostname)) {
+      throw new Error("Auth0 token endpoint must use HTTPS unless it is loopback");
+    }
   } catch (error) {
     throw new UpstreamError("Auth0 token endpoint is invalid", {
       deterministic: true,
@@ -623,11 +630,7 @@ function parseSseJsonRpc(text, requestId) {
         return parsed;
       }
     } catch (error) {
-      throw new UpstreamError("malformed upstream SSE data", {
-        indeterminate: true,
-        mappedCode: "CONTROLLER_MALFORMED_SSE_RESPONSE",
-        cause: error
-      });
+      continue;
     }
   }
   if (parsedEvents.length === 1) {
@@ -676,6 +679,57 @@ function validateJsonRpcResponse(response, requestId, malformedCode) {
   }
 }
 
+function normalizeControllerToolResult(name, result) {
+  let payload = result;
+  if (isMcpCallToolResult(result)) {
+    if (result?.structuredContent && typeof result.structuredContent === "object" && !Array.isArray(result.structuredContent)) {
+      payload = result.structuredContent;
+    } else {
+      throwUnexpectedResultShape("MCP tools/call response did not include structuredContent");
+    }
+  }
+  validateControllerToolPayload(name, payload);
+  return payload;
+}
+
+function isMcpCallToolResult(result) {
+  return Boolean(result && typeof result === "object" && (
+    Array.isArray(result.content)
+    || Object.hasOwn(result, "structuredContent")
+    || Object.hasOwn(result, "isError")
+  ));
+}
+
+function validateControllerToolPayload(name, payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throwUnexpectedResultShape("controller tool result is not an object");
+  }
+  if (name === "get_goal_status") {
+    if (!Object.hasOwn(payload, "goal") || !Array.isArray(payload.tasks) || !Array.isArray(payload.events)) {
+      throwUnexpectedResultShape("get_goal_status returned an unexpected result shape");
+    }
+    return;
+  }
+  if (name === "submit_goal") {
+    if (typeof payload.goal_id !== "string" || payload.goal_id.length === 0) {
+      throwUnexpectedResultShape("submit_goal returned an unexpected result shape");
+    }
+    return;
+  }
+  if (name === "submit_owner_decision") {
+    if (typeof payload.goal_state !== "string" || payload.goal_state.length === 0) {
+      throwUnexpectedResultShape("submit_owner_decision returned an unexpected result shape");
+    }
+  }
+}
+
+function throwUnexpectedResultShape(message) {
+  throw new UpstreamError(message, {
+    indeterminate: true,
+    mappedCode: "CONTROLLER_UNEXPECTED_RESULT_SHAPE"
+  });
+}
+
 function httpStatusDiagnosis(statusCode) {
   if (statusCode === 401) return "CONTROLLER_AUTH_REJECTED";
   if (statusCode === 403) return "CONTROLLER_AUTHORIZATION_REJECTED";
@@ -685,6 +739,36 @@ function httpStatusDiagnosis(statusCode) {
   if (statusCode >= 500) return "CONTROLLER_UPSTREAM_ERROR";
   if (statusCode >= 400) return "CONTROLLER_REQUEST_REJECTED";
   return "CONTROLLER_REDIRECTED";
+}
+
+function validateCredentialTransport(transport, url) {
+  if (transport.kind !== "http") return;
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new UpstreamError("controller URL is invalid", {
+      deterministic: true,
+      mappedCode: "CONTROLLER_INVALID_URL",
+      preSend: true,
+      transport
+    });
+  }
+  if (isLoopbackHost(parsed.hostname)) return;
+  throw new UpstreamError("controller credentials require HTTPS unless the controller is loopback", {
+    deterministic: true,
+    mappedCode: "CONTROLLER_INVALID_URL",
+    preSend: true,
+    transport
+  });
+}
+
+function isLoopbackHost(hostname) {
+  const normalized = String(hostname || "").toLowerCase();
+  return normalized === "localhost"
+    || normalized === "127.0.0.1"
+    || normalized === "::1"
+    || normalized === "[::1]";
 }
 
 function networkDiagnosis(error) {

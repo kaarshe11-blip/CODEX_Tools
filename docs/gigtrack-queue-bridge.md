@@ -62,14 +62,14 @@ The HTTP MCP endpoint and Auth0 audience are intentionally different:
 - MCP endpoint: `https://mcp-dev.kaarsheapps.online/mcp`
 - Auth0 audience: `https://mcp-dev.kaarsheapps.online`
 
-The bridge sends `Content-Type: application/json` and `Accept: application/json, text/event-stream` for HTTP(S) controller requests. It supports ordinary JSON and Streamable HTTP SSE responses that carry JSON-RPC payloads in `data:` events. The bridge keeps the narrow controller tool contract and calls only `get_goal_status`, `submit_goal`, and `submit_owner_decision`.
+The bridge sends `Content-Type: application/json` and `Accept: application/json, text/event-stream` for HTTP(S) controller requests. It supports ordinary JSON and Streamable HTTP SSE responses that carry JSON-RPC payloads in `data:` events, and accepts either raw domain `result` objects or MCP `tools/call` results with domain data in `structuredContent`. The bridge keeps the narrow controller tool contract and calls only `get_goal_status`, `submit_goal`, and `submit_owner_decision`.
 
 Authentication precedence is deterministic:
 
 1. `GQB_CONTROLLER_BEARER_TOKEN` static bearer, when configured.
 2. Auth0 Client Credentials M2M using the `GQB_CONTROLLER_AUTH0_*` variables.
 
-Automatic M2M uses `grant_type=client_credentials`, requests the configured audience and `mcp:controller` scope, caches the access token in memory only, refreshes at about 80% of the reported token lifetime, shares one in-flight token request across concurrent callers, and retries a controller request exactly once after HTTP 401 with a fresh token. Partial or invalid M2M configuration fails closed; it does not silently downgrade to unauthenticated controller access.
+Automatic M2M uses `grant_type=client_credentials`, requests the configured audience and `mcp:controller` scope, caches the access token in memory only, refreshes at about 80% of the reported token lifetime, shares one in-flight token request across concurrent callers, and retries a controller request exactly once after HTTP 401 with a fresh token. Partial or invalid M2M configuration fails closed; it does not silently downgrade to unauthenticated controller access. Credential-bearing controller and Auth0 traffic must use HTTPS unless the target is loopback for tests.
 
 Never store real bearer tokens, client secrets, access tokens, or Authorization headers in docs, source, examples, journal records, or diagnostics.
 
@@ -108,7 +108,7 @@ Common controller diagnoses:
 - `CONTROLLER_ENDPOINT_NOT_FOUND`: HTTP 404; confirm the path is `/mcp`.
 - `CONTROLLER_REDIRECTED`: unexpected HTTP 3xx response from the controller endpoint.
 - `CONTROLLER_UPSTREAM_ERROR`: upstream HTTP 5xx, including Cloudflare/origin failures.
-- `CONTROLLER_MALFORMED_JSON_RESPONSE`, `CONTROLLER_MALFORMED_SSE_RESPONSE`, `CONTROLLER_RESPONSE_ID_MISMATCH`: response parsing or JSON-RPC correlation failures.
+- `CONTROLLER_MALFORMED_JSON_RESPONSE`, `CONTROLLER_MALFORMED_SSE_RESPONSE`, `CONTROLLER_RESPONSE_ID_MISMATCH`, `CONTROLLER_UNEXPECTED_RESULT_SHAPE`: response parsing, JSON-RPC correlation, or controller tool result shape failures.
 - `AUTH0_M2M_CONFIG_INCOMPLETE`, `AUTH0_TOKEN_ACQUISITION_FAILED`, `AUTH0_INVALID_TOKEN_RESPONSE`, `AUTH0_TOKEN_MISSING_REQUIRED_SCOPE`: automatic M2M configuration or token failures.
 
 The MCP server implements `tools/list` and `tools/call` for:

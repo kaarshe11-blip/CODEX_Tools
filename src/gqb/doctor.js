@@ -315,6 +315,7 @@ export function rcaAssumptions({ configScan, launchProbe, nodePath, health }) {
     controller_malformed_json_response: verdict(Boolean(health?.data?.controller?.ping_attempted), controllerDiagnosis === "CONTROLLER_MALFORMED_JSON_RESPONSE", "gqb.controller.ping.completed"),
     controller_malformed_sse_response: verdict(Boolean(health?.data?.controller?.ping_attempted), controllerDiagnosis === "CONTROLLER_MALFORMED_SSE_RESPONSE", "gqb.controller.ping.completed"),
     controller_response_id_mismatch: verdict(Boolean(health?.data?.controller?.ping_attempted), controllerDiagnosis === "CONTROLLER_RESPONSE_ID_MISMATCH", "gqb.controller.ping.completed"),
+    controller_unexpected_result_shape: verdict(Boolean(health?.data?.controller?.ping_attempted), controllerDiagnosis === "CONTROLLER_UNEXPECTED_RESULT_SHAPE", "gqb.controller.ping.completed"),
     auth0_m2m_config_incomplete: transportAssumption(controllerDiagnosis === "AUTH0_M2M_CONFIG_INCOMPLETE"),
     auth0_token_acquisition_failed: transportAssumption(controllerDiagnosis === "AUTH0_TOKEN_ACQUISITION_FAILED"),
     auth0_invalid_token_response: transportAssumption(controllerDiagnosis === "AUTH0_INVALID_TOKEN_RESPONSE"),

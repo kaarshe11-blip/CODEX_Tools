@@ -242,7 +242,7 @@ test("controller client rejects unsupported URL schemes and ambiguous transport 
   await assert.rejects(
     () => unsupported.callTool("get_goal_status", {}),
     (error) => {
-      assert.equal(error.mappedCode, "CONTROLLER_UNCONFIGURED");
+      assert.equal(error.mappedCode, "CONTROLLER_INVALID_URL");
       return true;
     }
   );

@@ -109,6 +109,32 @@ test("controller client rejects MCP content-only results", async () => {
   });
 });
 
+for (const structuredContent of [null, { goal_id: "should-not-apply", created: true }]) {
+  test(`controller client rejects MCP isError results${structuredContent ? " with structuredContent" : ""}`, async () => {
+    await withServer(async (request, response) => {
+      const body = JSON.parse(await readBody(request));
+      const result = {
+        content: [{ type: "text", text: "upstream refused" }],
+        isError: true
+      };
+      if (structuredContent) result.structuredContent = structuredContent;
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ jsonrpc: "2.0", id: body.id, result }));
+    }, async (baseUrl) => {
+      const client = new ControllerClient({ url: `${baseUrl}/mcp` });
+      await assert.rejects(
+        () => client.callTool("submit_goal", { requestId: "gqb:req-is-error" }),
+        (error) => {
+          assert.equal(error.mappedCode, "UPSTREAM_INDETERMINATE");
+          assert.equal(error.indeterminate, true);
+          assert.equal(error.upstreamError.isError, true);
+          return true;
+        }
+      );
+    });
+  });
+}
+
 test("controller client parses SSE success responses and tolerates comments", async () => {
   await withServer(async (request, response) => {
     const body = JSON.parse(await readBody(request));

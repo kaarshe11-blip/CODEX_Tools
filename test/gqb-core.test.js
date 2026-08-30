@@ -705,6 +705,117 @@ test("reconcile replay refuses ambiguous submit when an unrelated active goal ex
   }
 });
 
+test("reconcile observe keeps its journal lock through writeOutcome", async () => {
+  const tmp = tempJournal();
+  let journal;
+  try {
+    journal = new SqliteJournal({ path: tmp.path }).open();
+    journal.createIntent({
+      goal_key: "goal-1",
+      goal_id: "goal-1",
+      upstream_request_id: "gqb:KAN-142-observe",
+      caller_request_id: "KAN-142-observe",
+      tool: "submit_owner_decision",
+      payload_hash: "hash",
+      upstream_arguments: {
+        requestId: "gqb:KAN-142-observe",
+        goalId: "goal-1",
+        decision: "resume queue"
+      },
+      trace_id: "trace"
+    });
+    const controller = new FakeController();
+    controller.status = runningStatus({
+      events: [{ event_type: "OWNER_DECISION", payload: { request_id: "gqb:KAN-142-observe" } }]
+    });
+    const bridge = new GigTrackQueueBridge({ controller, journal });
+    const result = await bridge.queue_reconcile({
+      mode: "OBSERVE",
+      goal_id: "goal-1",
+      upstream_request_id: "gqb:KAN-142-observe"
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.effect_status, "APPLIED");
+    assert.equal(journal.getEntry("goal-1", "gqb:KAN-142-observe").phase, "RECONCILED");
+  } finally {
+    journal?.close();
+    tmp.cleanup();
+  }
+});
+
+test("reconcile replay submit keeps its journal lock through writeOutcome", async () => {
+  const tmp = tempJournal();
+  let journal;
+  try {
+    journal = new SqliteJournal({ path: tmp.path }).open();
+    journal.createIntent({
+      goal_key: "__PRESUBMIT__:gqb:KAN-142-replay-apply",
+      upstream_request_id: "gqb:KAN-142-replay-apply",
+      caller_request_id: "KAN-142-replay-apply",
+      tool: "submit_goal",
+      payload_hash: "hash",
+      upstream_arguments: {
+        requestId: "gqb:KAN-142-replay-apply",
+        name: "Build Queue Bridge",
+        tasks: [{ jiraKey: "KAN-142", position: 1 }],
+        policy: { maxAttemptsPerTask: 4 }
+      },
+      trace_id: "trace"
+    });
+    const controller = new FakeController();
+    const bridge = new GigTrackQueueBridge({ controller, journal });
+    const result = await bridge.queue_reconcile({
+      mode: "REPLAY",
+      presubmit_request_id: "gqb:KAN-142-replay-apply",
+      upstream_request_id: "gqb:KAN-142-replay-apply"
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.effect_status, "APPLIED");
+    assert.equal(journal.getEntry("__PRESUBMIT__:gqb:KAN-142-replay-apply", "gqb:KAN-142-replay-apply").phase, "RECONCILED");
+  } finally {
+    journal?.close();
+    tmp.cleanup();
+  }
+});
+
+test("reconcile adopt submit keeps its journal lock through writeOutcome", async () => {
+  const tmp = tempJournal();
+  let journal;
+  try {
+    journal = new SqliteJournal({ path: tmp.path }).open();
+    journal.createIntent({
+      goal_key: "__PRESUBMIT__:gqb:KAN-142-adopt",
+      upstream_request_id: "gqb:KAN-142-adopt",
+      caller_request_id: "KAN-142-adopt",
+      tool: "submit_goal",
+      payload_hash: "hash",
+      upstream_arguments: {
+        requestId: "gqb:KAN-142-adopt",
+        name: "Queue",
+        tasks: [{ jiraKey: "KAN-142", position: 1 }],
+        policy: { maxAttemptsPerTask: 4 }
+      },
+      trace_id: "trace"
+    });
+    const controller = new FakeController();
+    controller.status = runningStatus({ goal: { goal_id: "goal-1", name: "Queue" } });
+    const bridge = new GigTrackQueueBridge({ controller, journal });
+    const result = await bridge.queue_reconcile({
+      mode: "ADOPT_SUBMIT",
+      presubmit_request_id: "gqb:KAN-142-adopt",
+      upstream_request_id: "gqb:KAN-142-adopt",
+      adopt_goal_id: "goal-1",
+      owner_confirmation_text: "Owner confirms adopting this matching submitted queue goal."
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.effect_status, "APPLIED");
+    assert.equal(journal.getEntry("__PRESUBMIT__:gqb:KAN-142-adopt", "gqb:KAN-142-adopt").phase, "RECONCILED");
+  } finally {
+    journal?.close();
+    tmp.cleanup();
+  }
+});
+
 test("lost lock lease after upstream success is indeterminate and points to reconcile", async () => {
   const journal = {
     ensureOpen() {},

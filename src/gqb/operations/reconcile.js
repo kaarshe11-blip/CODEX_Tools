@@ -18,9 +18,9 @@ export async function queueReconcile(bridge, args = {}) {
     if (entry.phase !== JOURNAL_PHASE.INTENT) return bridge.cachedEnvelope(entry, traceId);
     lock = await bridge.journal.acquireLock(entry.tool === "submit_goal" ? "active-goal-slot" : lockKeyForGoal(entry.goal_id ?? args.goal_id));
 
-    if (mode === "OBSERVE") return observeIntent(bridge, entry, traceId, lock);
-    if (mode === "ADOPT_SUBMIT") return adoptSubmit(bridge, entry, args, traceId, lock);
-    if (entry.tool === "submit_goal") return replaySubmit(bridge, entry, traceId, lock);
+    if (mode === "OBSERVE") return await observeIntent(bridge, entry, traceId, lock);
+    if (mode === "ADOPT_SUBMIT") return await adoptSubmit(bridge, entry, args, traceId, lock);
+    if (entry.tool === "submit_goal") return await replaySubmit(bridge, entry, traceId, lock);
 
     const result = await bridge.callMutator(entry.tool, entry.upstream_arguments, entry.goal_key, entry.upstream_request_id, lock);
     bridge.journal.writeOutcome(entry.goal_key, entry.upstream_request_id, {

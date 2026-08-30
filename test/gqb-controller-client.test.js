@@ -191,6 +191,58 @@ test("controller client rejects mismatched JSON-RPC response IDs", async () => {
   });
 });
 
+test("controller client rejects JSON-RPC responses with missing IDs", async () => {
+  await withServer(async (_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ jsonrpc: "2.0", result: SUCCESS_RESULT }));
+  }, async (baseUrl) => {
+    const client = new ControllerClient({ url: `${baseUrl}/mcp` });
+    await assert.rejects(
+      () => client.callTool("get_goal_status", {}),
+      (error) => {
+        assert.equal(error.mappedCode, "CONTROLLER_RESPONSE_ID_MISMATCH");
+        assert.equal(error.indeterminate, true);
+        return true;
+      }
+    );
+  });
+});
+
+test("get_goal_status accepts omitted events when events were not requested", async () => {
+  await withServer(async (request, response) => {
+    const body = JSON.parse(await readBody(request));
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(jsonRpcSuccess(body.id, { goal: null, tasks: [], current_dispatch: null }));
+  }, async (baseUrl) => {
+    const client = new ControllerClient({ url: `${baseUrl}/mcp` });
+    assert.deepEqual(await client.callTool("get_goal_status", { includeEvents: false }), {
+      goal: null,
+      tasks: [],
+      current_dispatch: null,
+      events: []
+    });
+  });
+});
+
+test("truncated controller responses fail instead of hanging", async () => {
+  await withServer(async (request, response) => {
+    await readBody(request);
+    response.writeHead(200, { "content-type": "application/json", "content-length": "1000" });
+    response.write("{\"jsonrpc\":\"2.0\"");
+    response.destroy();
+  }, async (baseUrl) => {
+    const client = new ControllerClient({ url: `${baseUrl}/mcp` });
+    await assert.rejects(
+      () => client.callTool("submit_goal", { requestId: "gqb:req-truncated" }, { timeoutMs: 500 }),
+      (error) => {
+        assert.equal(error.mappedCode, "UPSTREAM_INDETERMINATE");
+        assert.equal(error.indeterminate, true);
+        return true;
+      }
+    );
+  });
+});
+
 test("controller HTTP 5xx after send is indeterminate", async () => {
   await withServer(async (_request, response) => {
     response.writeHead(504).end("gateway timeout");
@@ -466,6 +518,39 @@ test("Auth0 token acquisition honors per-call timeout", async () => {
     assert.equal(ping.diagnosis, "AUTH0_TOKEN_ACQUISITION_FAILED");
     assert.equal(ping.ping_attempted, false);
     assert.ok(Date.now() - startedAt < 1000);
+  });
+});
+
+test("truncated Auth0 token responses fail and clear the in-flight token request", async () => {
+  let tokenRequests = 0;
+  await withServer(async (request, response) => {
+    if (request.url === "/oauth/token") {
+      tokenRequests += 1;
+      await readBody(request);
+      if (tokenRequests === 1) {
+        response.writeHead(200, { "content-type": "application/json", "content-length": "1000" });
+        response.write("{\"access_token\":\"token-1\"");
+        response.destroy();
+        return;
+      }
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ access_token: "token-2", token_type: "Bearer", expires_in: 100, scope: "mcp:controller" }));
+      return;
+    }
+    assert.equal(request.headers.authorization, "Bearer token-2");
+    await sendJsonSuccess(request, response);
+  }, async (baseUrl) => {
+    const client = new ControllerClient({ url: `${baseUrl}/mcp`, auth0: auth0Config(baseUrl) });
+    await assert.rejects(
+      () => client.callTool("get_goal_status", {}, { timeoutMs: 500 }),
+      (error) => {
+        assert.equal(error.mappedCode, "AUTH0_TOKEN_ACQUISITION_FAILED");
+        assert.equal(error.preSend, true);
+        return true;
+      }
+    );
+    assert.deepEqual(await client.callTool("get_goal_status", {}, { timeoutMs: 500 }), SUCCESS_RESULT);
+    assert.equal(tokenRequests, 2);
   });
 });
 

@@ -252,6 +252,39 @@ export class ControllerClient {
   performRequest({ name, body, transport, timeoutMs, traceId, authorization = null }) {
     let responseStarted = false;
     return new Promise((resolve, reject) => {
+      let settled = false;
+      const fail = (error) => {
+        if (settled) return;
+        settled = true;
+        reject(error);
+      };
+      const succeed = (value) => {
+        if (settled) return;
+        settled = true;
+        resolve(value);
+      };
+      const failAfterResponse = (message, cause = null) => {
+        const error = new UpstreamError(message, {
+          indeterminate: true,
+          mappedCode: "UPSTREAM_INDETERMINATE",
+          cause,
+          transport
+        });
+        this.logger.event("gqb.transport.request.failed", {
+          traceId,
+          level: "warn",
+          diagnosis: error.mappedCode,
+          details: {
+            tool: name,
+            transport,
+            response_started: true,
+            socket_bytes_written: req.socket?.bytesWritten ?? 0,
+            error_code: cause?.code ?? null,
+            message
+          }
+        });
+        fail(error);
+      };
       const options = this.requestOptions(transport, body, timeoutMs, authorization);
       const client = options.protocol === "https:" ? https : http;
       const req = client.request(
@@ -263,8 +296,17 @@ export class ControllerClient {
           res.on("data", (chunk) => {
             data += chunk;
           });
+          res.on("aborted", () => {
+            failAfterResponse("upstream response aborted");
+          });
+          res.on("error", (error) => {
+            failAfterResponse(error.message, error);
+          });
+          res.on("close", () => {
+            if (!res.complete) failAfterResponse("upstream response closed before completion");
+          });
           res.on("end", () => {
-            resolve({ statusCode: res.statusCode ?? 0, headers: res.headers, body: data });
+            succeed({ statusCode: res.statusCode ?? 0, headers: res.headers, body: data });
           });
         }
       );
@@ -290,7 +332,7 @@ export class ControllerClient {
               socket_bytes_written: req.socket?.bytesWritten ?? 0
             }
           });
-          reject(error);
+          fail(error);
           return;
         }
         const bytesWritten = req.socket?.bytesWritten ?? 0;
@@ -308,7 +350,7 @@ export class ControllerClient {
             message: error.message
           }
         });
-        reject(new UpstreamError(error.message, {
+        fail(new UpstreamError(error.message, {
           deterministic: mappedCode !== "UPSTREAM_INDETERMINATE",
           indeterminate: mappedCode === "UPSTREAM_INDETERMINATE",
           mappedCode,
@@ -488,11 +530,45 @@ async function requestAuth0Token(auth0, timeoutMs, traceId, logger) {
   };
   const client = options.protocol === "https:" ? https : http;
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
+    const succeed = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    const failTokenResponse = (message, cause = null) => {
+      logger.event("gqb.auth0.token.failed", {
+        traceId,
+        level: "warn",
+        diagnosis: "AUTH0_TOKEN_ACQUISITION_FAILED",
+        details: { token_endpoint: auth0.tokenUrl, code: cause?.code ?? null, message }
+      });
+      fail(new UpstreamError("Auth0 token acquisition failed", {
+        deterministic: true,
+        mappedCode: "AUTH0_TOKEN_ACQUISITION_FAILED",
+        preSend: true,
+        cause
+      }));
+    };
     const req = client.request(options, (res) => {
       let data = "";
       res.setEncoding("utf8");
       res.on("data", (chunk) => {
         data += chunk;
+      });
+      res.on("aborted", () => {
+        failTokenResponse("Auth0 token response aborted");
+      });
+      res.on("error", (error) => {
+        failTokenResponse(error.message, error);
+      });
+      res.on("close", () => {
+        if (!res.complete) failTokenResponse("Auth0 token response closed before completion");
       });
       res.on("end", () => {
         if ((res.statusCode ?? 0) >= 300) {
@@ -502,7 +578,7 @@ async function requestAuth0Token(auth0, timeoutMs, traceId, logger) {
             diagnosis: "AUTH0_TOKEN_ACQUISITION_FAILED",
             details: { status_code: res.statusCode, token_endpoint: auth0.tokenUrl }
           });
-          reject(new UpstreamError("Auth0 token acquisition failed", {
+          fail(new UpstreamError("Auth0 token acquisition failed", {
             deterministic: true,
             mappedCode: "AUTH0_TOKEN_ACQUISITION_FAILED",
             preSend: true,
@@ -510,7 +586,7 @@ async function requestAuth0Token(auth0, timeoutMs, traceId, logger) {
           }));
           return;
         }
-        resolve({ statusCode: res.statusCode, headers: res.headers, body: data });
+        succeed({ statusCode: res.statusCode, headers: res.headers, body: data });
       });
     });
     req.on("timeout", () => {
@@ -523,7 +599,7 @@ async function requestAuth0Token(auth0, timeoutMs, traceId, logger) {
     });
     req.on("error", (error) => {
       if (error instanceof UpstreamError) {
-        reject(error);
+        fail(error);
         return;
       }
       logger.event("gqb.auth0.token.failed", {
@@ -532,7 +608,7 @@ async function requestAuth0Token(auth0, timeoutMs, traceId, logger) {
         diagnosis: "AUTH0_TOKEN_ACQUISITION_FAILED",
         details: { token_endpoint: auth0.tokenUrl, code: error.code ?? null, message: error.message }
       });
-      reject(new UpstreamError("Auth0 token acquisition failed", {
+      fail(new UpstreamError("Auth0 token acquisition failed", {
         deterministic: true,
         mappedCode: "AUTH0_TOKEN_ACQUISITION_FAILED",
         preSend: true,
@@ -668,7 +744,7 @@ function validateJsonRpcResponse(response, requestId, malformedCode) {
   if (!response || typeof response !== "object") {
     throw new UpstreamError("malformed upstream result", { indeterminate: true, mappedCode: malformedCode });
   }
-  if (Object.hasOwn(response, "id") && response.id !== requestId) {
+  if (!Object.hasOwn(response, "id") || response.id !== requestId) {
     throw new UpstreamError("JSON-RPC response ID mismatch", {
       indeterminate: true,
       mappedCode: "CONTROLLER_RESPONSE_ID_MISMATCH"
@@ -694,6 +770,9 @@ function normalizeControllerToolResult(name, result) {
     } else {
       throwUnexpectedResultShape("MCP tools/call response did not include structuredContent");
     }
+  }
+  if (name === "get_goal_status" && payload && typeof payload === "object" && !Array.isArray(payload) && !Object.hasOwn(payload, "events")) {
+    payload = { ...payload, events: [] };
   }
   validateControllerToolPayload(name, payload);
   return payload;

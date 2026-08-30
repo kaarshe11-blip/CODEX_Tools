@@ -197,7 +197,7 @@ export class ControllerClient {
   async sendControllerRequest({ name, body, transport, timeoutMs, traceId }) {
     let retriedAfter401 = false;
     for (;;) {
-      const auth = await this.authorizationForTransport(transport, traceId);
+      const auth = await this.authorizationForTransport(transport, traceId, timeoutMs);
       const response = await this.performRequest({ name, body, transport, timeoutMs, traceId, authorization: auth.header });
       if (response.statusCode === 401 && auth.source === "auth0_client_credentials" && !retriedAfter401) {
         retriedAfter401 = true;
@@ -217,17 +217,17 @@ export class ControllerClient {
     }
   }
 
-  async authorizationForTransport(transport, traceId = null) {
+  async authorizationForTransport(transport, traceId = null, timeoutMs = this.timeoutMs) {
     if (this.bearerToken) return { source: "static_bearer", header: `Bearer ${this.bearerToken}` };
     if (!this.auth0 || !["http", "existing_remote"].includes(transport.kind)) return { source: "none", header: null };
-    const token = await this.getAccessToken(traceId);
+    const token = await this.getAccessToken(traceId, timeoutMs);
     return { source: "auth0_client_credentials", header: `Bearer ${token}` };
   }
 
-  async getAccessToken(traceId = null) {
+  async getAccessToken(traceId = null, timeoutMs = this.timeoutMs) {
     if (this.cachedToken && this.now() < this.cachedToken.refreshAt) return this.cachedToken.accessToken;
     if (this.tokenPromise) return this.tokenPromise;
-    this.tokenPromise = this.acquireAccessToken(traceId).finally(() => {
+    this.tokenPromise = this.acquireAccessToken(traceId, timeoutMs).finally(() => {
       this.tokenPromise = null;
     });
     return this.tokenPromise;
@@ -237,9 +237,9 @@ export class ControllerClient {
     this.cachedToken = null;
   }
 
-  async acquireAccessToken(traceId = null) {
+  async acquireAccessToken(traceId = null, timeoutMs = this.timeoutMs) {
     validateAuth0Config(this.auth0);
-    const response = await requestAuth0Token(this.auth0, this.timeoutMs, traceId, this.logger);
+    const response = await requestAuth0Token(this.auth0, timeoutMs, traceId, this.logger);
     const token = parseAuth0TokenResponse(response, this.auth0, this.now);
     this.cachedToken = token;
     return token.accessToken;
@@ -320,6 +320,7 @@ export class ControllerClient {
 
   httpStatusError(response, { name, transport, traceId }) {
     const mappedCode = httpStatusDiagnosis(response.statusCode);
+    const indeterminate = response.statusCode >= 500 || response.statusCode === 408 || response.statusCode === 429;
     const event = mappedCode === "CONTROLLER_AUTH_REJECTED" ? "gqb.controller.auth.rejected" : "gqb.transport.request.failed";
     this.logger.event(event, {
       traceId,
@@ -328,7 +329,8 @@ export class ControllerClient {
       details: { tool: name, status_code: response.statusCode, transport, response_started: true }
     });
     return new UpstreamError(`controller HTTP ${response.statusCode}`, {
-      deterministic: true,
+      deterministic: !indeterminate,
+      indeterminate,
       mappedCode,
       statusCode: response.statusCode,
       transport
@@ -557,7 +559,7 @@ function parseAuth0TokenResponse(response, auth0, now) {
       preSend: true
     });
   }
-  if (Object.hasOwn(parsed, "scope") && !scopeIncludes(parsed.scope, REQUIRED_CONTROLLER_SCOPE)) {
+  if (!scopeIncludes(parsed.scope, REQUIRED_CONTROLLER_SCOPE)) {
     throw new UpstreamError("Auth0 token response is missing required controller scope", {
       deterministic: true,
       mappedCode: "AUTH0_TOKEN_MISSING_REQUIRED_SCOPE",

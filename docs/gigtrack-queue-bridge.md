@@ -106,6 +106,7 @@ Common controller diagnoses:
 - `CONTROLLER_MEDIA_NEGOTIATION_FAILED`: HTTP 406, usually missing or unsupported `Accept` media types.
 - `CONTROLLER_CONTENT_TYPE_REJECTED`: HTTP 415, usually unsupported request `Content-Type`.
 - `CONTROLLER_ENDPOINT_NOT_FOUND`: HTTP 404; confirm the path is `/mcp`.
+- `CONTROLLER_REDIRECTED`: unexpected HTTP 3xx response from the controller endpoint.
 - `CONTROLLER_UPSTREAM_ERROR`: upstream HTTP 5xx, including Cloudflare/origin failures.
 - `CONTROLLER_MALFORMED_JSON_RESPONSE`, `CONTROLLER_MALFORMED_SSE_RESPONSE`, `CONTROLLER_RESPONSE_ID_MISMATCH`: response parsing or JSON-RPC correlation failures.
 - `AUTH0_M2M_CONFIG_INCOMPLETE`, `AUTH0_TOKEN_ACQUISITION_FAILED`, `AUTH0_INVALID_TOKEN_RESPONSE`, `AUTH0_TOKEN_MISSING_REQUIRED_SCOPE`: automatic M2M configuration or token failures.

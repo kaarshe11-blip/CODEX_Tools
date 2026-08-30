@@ -44,6 +44,12 @@ export class GigTrackQueueBridge {
         env_present: {
           GQB_CONTROLLER_SOCKET: Boolean(env.GQB_CONTROLLER_SOCKET),
           GQB_CONTROLLER_URL: Boolean(env.GQB_CONTROLLER_URL),
+          GQB_CONTROLLER_AUTH0_TOKEN_URL: Boolean(env.GQB_CONTROLLER_AUTH0_TOKEN_URL),
+          GQB_CONTROLLER_AUTH0_DOMAIN: Boolean(env.GQB_CONTROLLER_AUTH0_DOMAIN),
+          GQB_CONTROLLER_AUTH0_CLIENT_ID: Boolean(env.GQB_CONTROLLER_AUTH0_CLIENT_ID),
+          GQB_CONTROLLER_AUTH0_CLIENT_SECRET: Boolean(env.GQB_CONTROLLER_AUTH0_CLIENT_SECRET),
+          GQB_CONTROLLER_AUTH0_AUDIENCE: Boolean(env.GQB_CONTROLLER_AUTH0_AUDIENCE),
+          GQB_CONTROLLER_AUTH0_SCOPE: Boolean(env.GQB_CONTROLLER_AUTH0_SCOPE),
           GQB_CONTROLLER_MODE: env.GQB_CONTROLLER_MODE ?? null,
           GQB_ALLOW_DEV_LOCAL_CONTROLLER: env.GQB_ALLOW_DEV_LOCAL_CONTROLLER === "true",
           GQB_LOCAL_CONTROLLER_STATE_PATH: Boolean(env.GQB_LOCAL_CONTROLLER_STATE_PATH),
@@ -216,10 +222,13 @@ export class GigTrackQueueBridge {
     const traceId = randomUUID();
     let journal = { configured: Boolean(this.journal), available: false, open_intents: null, error: null };
     const transport = this.controller.describeTransport();
+    const authentication = typeof this.controller.describeAuth === "function"
+      ? this.controller.describeAuth()
+      : { configured: false, method: "unknown", precedence: null };
     this.logger.event("gqb.transport.selected", {
       traceId,
       diagnosis: transportDiagnosis(transport),
-      details: { transport, launch_origin: this.launchSource }
+      details: { transport, authentication, launch_origin: this.launchSource }
     });
     try {
       if (this.journal) {
@@ -265,6 +274,7 @@ export class GigTrackQueueBridge {
       diagnosis: controller.diagnosis,
       details: {
         transport,
+        authentication,
         reachable: controller.reachable,
         ping_attempted: controller.ping_attempted ?? null,
         idle_goal_null_accepted: controller.idle_goal_null_accepted ?? false,
@@ -288,7 +298,11 @@ export class GigTrackQueueBridge {
         ok,
         journal_available: journal.available,
         ownership_channel_available: this.ownershipChannelAvailable,
+        controller_transport_configured: transportConfigured(transport),
+        https_transport_selected: transport.kind === "existing_remote",
+        authentication_configured: authentication.configured,
         controller_reachable: controller.reachable,
+        controller_ready: controller.reachable,
         blocking_mutators: !ok
       }
     });
@@ -301,6 +315,10 @@ export class GigTrackQueueBridge {
         ownership_channel_available: this.ownershipChannelAvailable,
         controller_socket: this.controller.socketPath ?? null,
         controller_transport: transport,
+        controller_transport_configured: transportConfigured(transport),
+        https_transport_selected: transport.kind === "existing_remote",
+        controller_authentication: authentication,
+        controller_ready: controller.reachable,
         controller: {
           ping_attempted: controller.ping_attempted ?? transportCanAttempt(transport),
           reachable: controller.reachable,
@@ -415,14 +433,19 @@ export class GigTrackQueueBridge {
 }
 
 function transportDiagnosis(transport) {
-  if (transport.kind === "none" || transport.kind === "invalid_url") return "CONTROLLER_UNCONFIGURED";
+  if (transport.kind === "none") return "CONTROLLER_UNCONFIGURED";
+  if (transport.kind === "invalid_url") return "CONTROLLER_INVALID_URL";
   if (transport.kind === "ambiguous") return "CONTROLLER_CONFIG_AMBIGUOUS";
   if (transport.kind === "embedded_local_disabled") return "CONTROLLER_DEV_MODE_REQUIRED";
   return null;
 }
 
-function transportCanAttempt(transport) {
+function transportConfigured(transport) {
   return transport.kind === "socket" || transport.kind === "http" || transport.kind === "existing_remote" || transport.kind === LOCAL_CONTROLLER_MODE;
+}
+
+function transportCanAttempt(transport) {
+  return transportConfigured(transport);
 }
 
 function controllerFromEnv(env, { logger }) {
@@ -459,6 +482,7 @@ function controllerFromEnv(env, { logger }) {
 
 function channelForTransport(transport) {
   if (transport.kind === LOCAL_CONTROLLER_MODE) return CHANNEL.EMBEDDED_LOCAL;
+  if (transport.kind === "http" || transport.kind === "existing_remote") return CHANNEL.PUBLIC_DECLARED;
   return CHANNEL.LOCAL_SOCKET;
 }
 

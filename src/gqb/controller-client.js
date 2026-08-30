@@ -191,7 +191,7 @@ export class ControllerClient {
         mappedCode: "CONTROLLER_MALFORMED_JSON_RESPONSE"
       });
     }
-    return normalizeControllerToolResult(name, response.result);
+    return normalizeControllerToolResult(name, response.result, args);
   }
 
   async sendControllerRequest({ name, body, transport, timeoutMs, traceId }) {
@@ -755,7 +755,7 @@ function validateJsonRpcResponse(response, requestId, malformedCode) {
   }
 }
 
-function normalizeControllerToolResult(name, result) {
+function normalizeControllerToolResult(name, result, args = {}) {
   let payload = result;
   if (result?.isError === true) {
     throw new UpstreamError(mcpErrorMessage(result), {
@@ -771,7 +771,8 @@ function normalizeControllerToolResult(name, result) {
       throwUnexpectedResultShape("MCP tools/call response did not include structuredContent");
     }
   }
-  if (name === "get_goal_status" && payload && typeof payload === "object" && !Array.isArray(payload) && !Object.hasOwn(payload, "events")) {
+  const eventsSuppressed = args?.includeEvents === false || args?.include_events === false;
+  if (name === "get_goal_status" && eventsSuppressed && payload && typeof payload === "object" && !Array.isArray(payload) && !Object.hasOwn(payload, "events")) {
     payload = { ...payload, events: [] };
   }
   validateControllerToolPayload(name, payload);

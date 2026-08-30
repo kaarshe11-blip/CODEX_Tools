@@ -224,6 +224,24 @@ test("get_goal_status accepts omitted events when events were not requested", as
   });
 });
 
+test("get_goal_status rejects omitted events when events were requested", async () => {
+  await withServer(async (request, response) => {
+    const body = JSON.parse(await readBody(request));
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(jsonRpcSuccess(body.id, { goal: null, tasks: [], current_dispatch: null }));
+  }, async (baseUrl) => {
+    const client = new ControllerClient({ url: `${baseUrl}/mcp` });
+    await assert.rejects(
+      () => client.callTool("get_goal_status", { includeEvents: true }),
+      (error) => {
+        assert.equal(error.mappedCode, "CONTROLLER_UNEXPECTED_RESULT_SHAPE");
+        assert.equal(error.indeterminate, true);
+        return true;
+      }
+    );
+  });
+});
+
 test("truncated controller responses fail instead of hanging", async () => {
   await withServer(async (request, response) => {
     await readBody(request);

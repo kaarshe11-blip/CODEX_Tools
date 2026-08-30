@@ -681,6 +681,13 @@ function validateJsonRpcResponse(response, requestId, malformedCode) {
 
 function normalizeControllerToolResult(name, result) {
   let payload = result;
+  if (result?.isError === true) {
+    throw new UpstreamError(mcpErrorMessage(result), {
+      indeterminate: true,
+      mappedCode: "UPSTREAM_INDETERMINATE",
+      upstreamError: result
+    });
+  }
   if (isMcpCallToolResult(result)) {
     if (result?.structuredContent && typeof result.structuredContent === "object" && !Array.isArray(result.structuredContent)) {
       payload = result.structuredContent;
@@ -721,6 +728,13 @@ function validateControllerToolPayload(name, payload) {
       throwUnexpectedResultShape("submit_owner_decision returned an unexpected result shape");
     }
   }
+}
+
+function mcpErrorMessage(result) {
+  const text = Array.isArray(result?.content)
+    ? result.content.find((item) => item?.type === "text" && typeof item.text === "string")?.text
+    : null;
+  return text || "upstream tool reported an error";
 }
 
 function throwUnexpectedResultShape(message) {

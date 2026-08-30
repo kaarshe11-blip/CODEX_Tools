@@ -623,6 +623,53 @@ test("submit rejects MCP content-only result before journaling applied", async (
   }
 });
 
+test("submit treats MCP isError structuredContent as indeterminate", async () => {
+  const tmp = tempJournal();
+  let journal;
+  const server = http.createServer(async (request, response) => {
+    const body = JSON.parse(await readBody(request));
+    if (body.params.name === "get_goal_status") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(jsonRpcSuccess(body.id, { goal: null, tasks: [], current_dispatch: null, events: [] }));
+      return;
+    }
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(jsonRpcSuccess(body.id, {
+      content: [{ type: "text", text: "upstream refused" }],
+      structuredContent: { goal_id: "g-err", created: true },
+      isError: true
+    }));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  try {
+    journal = new SqliteJournal({ path: tmp.path }).open();
+    const controller = new ControllerClient({ url: `http://127.0.0.1:${server.address().port}/mcp` });
+    const bridge = new GigTrackQueueBridge({ controller, journal });
+    const result = await bridge.queue_submit({
+      request_id: "KAN-142-is-error",
+      name: "Build Queue Bridge",
+      ordered_jira_keys: ["KAN-142"]
+    });
+    assert.equal(result.error_code, "UPSTREAM_INDETERMINATE");
+    assert.equal(result.effect_status, "INDETERMINATE");
+    assert.equal(result.next_safe_action.code, "RECONCILE_BRIDGE_UNCERTAINTY");
+
+    const replay = await bridge.queue_submit({
+      request_id: "KAN-142-is-error",
+      name: "Build Queue Bridge",
+      ordered_jira_keys: ["KAN-142"]
+    });
+    assert.equal(replay.error_code, "RECONCILE_BRIDGE_UNCERTAINTY");
+    assert.equal(replay.effect_status, "INDETERMINATE");
+  } finally {
+    journal?.close();
+    tmp.cleanup();
+    server.close();
+    await once(server, "close");
+  }
+});
+
 test("reconcile replay refuses ambiguous submit when an unrelated active goal exists", async () => {
   const tmp = tempJournal();
   let journal;
@@ -677,6 +724,19 @@ test("lost lock lease after upstream success is indeterminate and points to reco
   assert.equal(result.error_code, "LOCK_LEASE_LOST");
   assert.equal(result.effect_status, "INDETERMINATE");
   assert.equal(result.next_safe_action.code, "RECONCILE_BRIDGE_UNCERTAINTY");
+});
+
+test("pre-send Auth0 timeout keeps authentication diagnosis", async () => {
+  const error = new UpstreamError("Auth0 token acquisition timed out", {
+    deterministic: true,
+    mappedCode: "AUTH0_TOKEN_ACQUISITION_FAILED",
+    preSend: true,
+    timeout: true
+  });
+  const bridge = new GigTrackQueueBridge({ controller: new FailingController(error) });
+  const result = await bridge.queue_status();
+  assert.equal(result.error_code, "AUTH0_TOKEN_ACQUISITION_FAILED");
+  assert.equal(result.effect_status, "NOT_APPLIED");
 });
 
 test("resume gate returns closed error codes for in-flight and invalid task target", async () => {

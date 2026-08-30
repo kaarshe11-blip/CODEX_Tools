@@ -413,7 +413,7 @@ export class GigTrackQueueBridge {
       });
     }
     if (error instanceof UpstreamError) {
-      const errorCode = error.timeout ? "UPSTREAM_TIMEOUT_INDETERMINATE" : error.mappedCode ?? "UPSTREAM_INDETERMINATE";
+      const errorCode = error.timeout && error.indeterminate ? "UPSTREAM_TIMEOUT_INDETERMINATE" : error.mappedCode ?? "UPSTREAM_INDETERMINATE";
       return envelope({
         error_code: errorCode,
         effect_status: error.deterministic ? EFFECT_STATUS.NOT_APPLIED : EFFECT_STATUS.INDETERMINATE,
